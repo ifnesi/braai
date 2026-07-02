@@ -76,7 +76,10 @@ cat question.txt | ./braai --model mistral --working-dir .
 ```
 
 Answers are always streamed to stdout as the model produces them, rather than
-printed only once the full response is ready.
+printed only once the full response is ready. When `--show-reasoning` is used
+in a real terminal, the reasoning trace is dimmed so it's visually distinct
+from the final answer; the dimming is skipped automatically when stdout is
+piped or redirected, so redirected output stays free of ANSI escape codes.
 
 The interactive chat supports standard readline-style line editing: left/right
 arrows to move within the line, Ctrl-A/Ctrl-E to jump to the start/end of the

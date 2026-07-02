@@ -114,6 +114,7 @@ Flags:
 		VerboseWriter: stderr,
 		ShowReasoning: *showReasoning,
 		Stdout:        stdout,
+		UseColor:      isInteractive(stdout),
 	})
 
 	trailing := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -264,8 +265,12 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func isInteractive(r io.Reader) bool {
-	f, ok := r.(*os.File)
+// isInteractive reports whether r is a real terminal (as opposed to a pipe
+// or redirected file). Used both to decide whether piped stdin should be
+// slurped as the prompt, and whether an io.Writer stream is safe to send
+// ANSI color codes to.
+func isInteractive(v any) bool {
+	f, ok := v.(*os.File)
 	if !ok {
 		return true
 	}

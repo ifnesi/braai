@@ -52,6 +52,11 @@ type Options struct {
 	// set) as it arrives from the model, token by token, rather than all at
 	// once when the response completes.
 	Stdout io.Writer
+	// UseColor enables ANSI styling (currently: dimming the reasoning trace
+	// so it reads as visually distinct from the final answer). Callers
+	// should only set this when Stdout is a real terminal, since ANSI codes
+	// would otherwise corrupt piped/redirected output.
+	UseColor bool
 }
 
 // Agent drives the chat/tool-calling loop for one conversation.
@@ -91,7 +96,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 	}
 
 	for i := 0; i < a.opts.MaxToolCalls+1; i++ {
-		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning)
+		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.UseColor)
 
 		resp, err := a.client.ChatStream(ctx, ollama.ChatRequest{
 			Model:    a.opts.Model,

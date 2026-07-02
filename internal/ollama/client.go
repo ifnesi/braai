@@ -204,44 +204,79 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onChunk func(C
 	return &final, nil
 }
 
-// showResponse mirrors the fields we need from POST /api/show.
+// showResponse mirrors the fields we need from POST /api/show. ModelInfo is a
+// flat map of family-prefixed keys (e.g. "llama.context_length",
+// "gemma4.context_length") since the key name depends on the model
+// architecture; there is no single fixed field name across model families.
 type showResponse struct {
-	Capabilities []string `json:"capabilities"`
+	Capabilities []string       `json:"capabilities"`
+	ModelInfo    map[string]any `json:"model_info"`
 }
 
-// ModelCapabilities returns the capability strings Ollama reports for a
-// model (e.g. "completion", "tools", "vision", "thinking"), via /api/show.
-func (c *Client) ModelCapabilities(ctx context.Context, model string) ([]string, error) {
+// ModelInfo describes the properties of a model that braai cares about.
+type ModelInfo struct {
+	Capabilities []string
+	// ContextLength is the model's context window in tokens, or 0 if it
+	// could not be determined (e.g. an older Ollama server that doesn't
+	// report model_info).
+	ContextLength int
+}
+
+// HasCapability reports whether the model advertises the given capability
+// string (e.g. "vision", "tools", "thinking").
+func (m ModelInfo) HasCapability(name string) bool {
+	for _, c := range m.Capabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ShowModel returns capability and context-length information for a model
+// via /api/show.
+func (c *Client) ShowModel(ctx context.Context, model string) (ModelInfo, error) {
 	body, err := json.Marshal(map[string]string{"model": model})
 	if err != nil {
-		return nil, fmt.Errorf("encode show request: %w", err)
+		return ModelInfo{}, fmt.Errorf("encode show request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/show", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build show request: %w", err)
+		return ModelInfo{}, fmt.Errorf("build show request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("calling ollama at %s: %w (is `ollama serve` running?)", c.baseURL, err)
+		return ModelInfo{}, fmt.Errorf("calling ollama at %s: %w (is `ollama serve` running?)", c.baseURL, err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read ollama response: %w", err)
+		return ModelInfo{}, fmt.Errorf("read ollama response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(data))
+		return ModelInfo{}, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(data))
 	}
 
 	var show showResponse
 	if err := json.Unmarshal(data, &show); err != nil {
-		return nil, fmt.Errorf("decode show response: %w", err)
+		return ModelInfo{}, fmt.Errorf("decode show response: %w", err)
 	}
-	return show.Capabilities, nil
+
+	info := ModelInfo{Capabilities: show.Capabilities}
+	for key, val := range show.ModelInfo {
+		if !strings.HasSuffix(key, ".context_length") {
+			continue
+		}
+		if f, ok := val.(float64); ok {
+			info.ContextLength = int(f)
+		}
+		break
+	}
+	return info, nil
 }
 
 // tagsResponse mirrors GET /api/tags.

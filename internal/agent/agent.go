@@ -57,6 +57,11 @@ type Options struct {
 	// should only set this when Stdout is a real terminal, since ANSI codes
 	// would otherwise corrupt piped/redirected output.
 	UseColor bool
+	// ContextLength is the active model's context window in tokens, as
+	// reported by Ollama's /api/show. When set (> 0), Run warns to
+	// VerboseWriter if the conversation looks likely to approach or exceed
+	// it. Zero disables the check (e.g. when the server didn't report one).
+	ContextLength int
 }
 
 // Agent drives the chat/tool-calling loop for one conversation.
@@ -82,12 +87,34 @@ func SystemMessage() ollama.Message {
 	return ollama.Message{Role: "system", Content: systemPrompt}
 }
 
+// ToolCallRecord is a record of one tool invocation made during a Run,
+// exposed so callers (e.g. --output json) can report exactly what evidence
+// the model gathered, not just its final answer.
+type ToolCallRecord struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	Error     string         `json:"error,omitempty"`
+}
+
+// RunResult is everything a single Run call produced.
+type RunResult struct {
+	Answer    string           `json:"answer"`
+	Reasoning string           `json:"reasoning,omitempty"`
+	ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"`
+	// History is the updated conversation, including this turn, for the
+	// caller to pass back into the next Run call.
+	History []ollama.Message `json:"-"`
+}
+
 // Run executes the tool-calling loop over the given message history (which
 // must already include the system message and the latest user message) and
-// returns the final assistant text plus the updated history. The answer (and
-// reasoning, if enabled) is streamed to opts.Stdout as it is produced.
-func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ollama.Message, error) {
+// returns the final result. The answer (and reasoning, if enabled) is
+// streamed to opts.Stdout as it is produced, unless opts.Stdout is a
+// discarding writer (e.g. for --output json, which buffers instead).
+func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, error) {
 	toolDefs := a.registry.Definitions()
+	var toolCalls []ToolCallRecord
 
 	var think *bool
 	if a.opts.ShowReasoning {
@@ -95,7 +122,17 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 		think = &t
 	}
 
+	warnedContext := false
+
 	for i := 0; i < a.opts.MaxToolCalls+1; i++ {
+		if a.opts.ContextLength > 0 && !warnedContext {
+			if used, ratio := estimateContextUsage(history, a.opts.ContextLength); ratio >= contextWarnThreshold {
+				fmt.Fprintf(a.opts.VerboseWriter, "warning: conversation is ~%d%% of %s's estimated %d-token context window (~%d tokens); it may start dropping earlier context or produce degraded answers. Consider a shorter prompt, fewer read_files at once, or (in chat mode) /clear.\n",
+					int(ratio*100), a.opts.Model, a.opts.ContextLength, used)
+				warnedContext = true
+			}
+		}
+
 		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.UseColor)
 
 		resp, err := a.client.ChatStream(ctx, ollama.ChatRequest{
@@ -105,14 +142,19 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 			Think:    think,
 		}, streamer.onChunk)
 		if err != nil {
-			return "", history, fmt.Errorf("ollama chat request failed: %w", err)
+			return RunResult{History: history}, fmt.Errorf("ollama chat request failed: %w", err)
 		}
 		streamer.finish()
 
 		history = append(history, resp.Message)
 
 		if len(resp.Message.ToolCalls) == 0 {
-			return resp.Message.Content, history, nil
+			return RunResult{
+				Answer:    resp.Message.Content,
+				Reasoning: resp.Message.Thinking,
+				ToolCalls: toolCalls,
+				History:   history,
+			}, nil
 		}
 
 		if a.opts.Verbose {
@@ -121,7 +163,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 
 		if i == a.opts.MaxToolCalls {
 			// Model wants to keep calling tools but we've hit the guardrail.
-			return "", history, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
+			return RunResult{ToolCalls: toolCalls, History: history}, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
 		}
 
 		for _, tc := range resp.Message.ToolCalls {
@@ -130,9 +172,12 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 				a.logToolCall(tc, result, callErr)
 			}
 			content := result.Text
+			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: result.Text}
 			if callErr != nil {
 				content = fmt.Sprintf("error: %v", callErr)
+				record.Error = callErr.Error()
 			}
+			toolCalls = append(toolCalls, record)
 			history = append(history, ollama.Message{
 				Role:     "tool",
 				Content:  content,
@@ -142,7 +187,38 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 		}
 	}
 
-	return "", history, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
+	return RunResult{ToolCalls: toolCalls, History: history}, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
+}
+
+// contextWarnThreshold is the fraction of a model's context window at which
+// Run starts warning that the conversation is getting large.
+const contextWarnThreshold = 0.8
+
+// charsPerToken is a rough English-text heuristic (~4 characters per token)
+// used only to decide when to warn, not for anything that needs precision.
+const charsPerToken = 4
+
+// imageTokenEstimate is a rough, model-agnostic guess at how many tokens a
+// single attached image consumes once encoded by a vision model. Actual
+// costs vary a lot by model and image size; this exists only to keep the
+// context-window warning roughly honest when read_image has been used.
+const imageTokenEstimate = 768
+
+// estimateContextUsage returns a rough token count for history and its ratio
+// to contextLength. This is intentionally approximate (character counting,
+// not the model's real tokenizer) — good enough to warn well before a
+// conversation is likely to overflow the context window, not to predict it
+// exactly.
+func estimateContextUsage(history []ollama.Message, contextLength int) (tokens int, ratio float64) {
+	chars := 0
+	images := 0
+	for _, m := range history {
+		chars += len(m.Content) + len(m.Thinking)
+		images += len(m.Images)
+	}
+	tokens = chars/charsPerToken + images*imageTokenEstimate
+	ratio = float64(tokens) / float64(contextLength)
+	return tokens, ratio
 }
 
 func (a *Agent) executeTool(tc ollama.ToolCall) (tools.Result, error) {

@@ -73,13 +73,24 @@ cat question.txt | ./braai --model mistral --working-dir .
 
 # Stream the model's reasoning/thinking trace before its answer
 ./braai --model llama3.1 --show-reasoning "why does main.go split runOnce and runChat?"
+
+# Get a single structured JSON object instead of streamed text, e.g. for scripting
+./braai --model llama3.1 --output json "list the files in internal/tools" | jq .
 ```
 
-Answers are always streamed to stdout as the model produces them, rather than
-printed only once the full response is ready. When `--show-reasoning` is used
-in a real terminal, the reasoning trace is dimmed so it's visually distinct
-from the final answer; the dimming is skipped automatically when stdout is
-piped or redirected, so redirected output stays free of ANSI escape codes.
+By default (`--output text`), answers are streamed to stdout as the model
+produces them, rather than printed only once the full response is ready.
+When `--show-reasoning` is used in a real terminal, the reasoning trace is
+dimmed so it's visually distinct from the final answer; the dimming is
+skipped automatically when stdout is piped or redirected, so redirected
+output stays free of ANSI escape codes.
+
+With `--output json`, streaming is disabled and braai instead prints one
+JSON object per answer once it's complete:
+`{"answer": "...", "reasoning": "...", "tool_calls": [{"name": "...", "arguments": {...}, "result": "..."}]}`.
+`reasoning` is only populated when `--show-reasoning` is also set, and
+`tool_calls` is omitted if the model answered without using any tools. This
+works in both one-shot and interactive chat mode (one JSON object per turn).
 
 The interactive chat supports standard readline-style line editing: left/right
 arrows to move within the line, Ctrl-A/Ctrl-E to jump to the start/end of the
@@ -88,9 +99,34 @@ line, Ctrl-C to clear the current input (without exiting), Ctrl-D or
 sessions (persisted to `~/.braai/chat_history`, capped at the last 100
 entries — the file is trimmed to that limit every time braai starts).
 
+A few slash-commands are available inside the chat:
+
+| Command | Effect |
+|---|---|
+| `/help` | List available commands |
+| `/clear` | Reset the conversation history and clear the visible screen (start fresh without restarting) |
+| `/forget-history` | Erase `~/.braai/chat_history` — the up/down arrow recall history — separate from the conversation itself |
+| `/tools` | List the tools currently available to the model |
+| `/model` | Show the current model and list every model available on the Ollama server |
+| `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/settings.json`) |
+| `/save <file>` | Save the visible conversation (your messages + braai's answers) as Markdown |
+
+If the conversation is getting close to the model's context window, braai
+prints a warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
+estimated 131072-token context window...`) suggesting `/clear`, a shorter
+prompt, or reading fewer files at once. This is based on a rough
+character-count estimate, not the model's actual tokenizer, so treat it as a
+heads-up rather than an exact measurement.
+
 If `--model` is omitted, `braai` uses the first model reported by the Ollama
 server (preferring the last model you used, if it's still installed). If no
 models are installed at all, it exits with an error instead of starting.
+
+On every startup, braai prints which model it's using (`using model:
+<name>`) to stderr — so it never pollutes `--output json` or piped stdout —
+and interactive chat also shows it in the opening banner. You can switch
+models at any time from inside the chat with `/model` (see below) instead of
+restarting with a different `--model` flag.
 
 ### Flags
 
@@ -105,6 +141,7 @@ models are installed at all, it exits with an error instead of starting.
 | `--max-tool-calls` | `100` | Max tool calls allowed per request before aborting |
 | `--max-read-bytes` | `-1` (no limit) | Max bytes `read_file` will return |
 | `--version` | — | Print the braai version and exit |
+| `--output` | `text` | `text` streams the answer as produced; `json` buffers and prints one JSON object per answer (`answer`, `reasoning`, `tool_calls`) |
 
 ### Configuration file
 
@@ -187,6 +224,14 @@ The agent loop (`internal/agent/agent.go`) is intentionally simple:
 3. Repeat until the model returns a plain text answer or a configurable
    `--max-tool-calls` guardrail is hit.
 
+`Agent.Run` returns an `agent.RunResult` (answer, reasoning, and a
+`[]ToolCallRecord` of every tool call made this turn, each with its name,
+arguments, and result) alongside the updated history. In text mode the
+answer is streamed to `Options.Stdout` as it's produced and `RunResult` is
+only used for its `History`; in `--output json` mode `Options.Stdout` is set
+to `io.Discard` so nothing streams, and `main.go` marshals `RunResult`
+directly once `Run` returns.
+
 This relies on Ollama's native OpenAI-compatible tool-calling support in
 `/api/chat` (message `tool_calls` / role `"tool"`). The `ollama.Message` and
 `ollama.Tool` types are a thin, self-contained representation of that wire
@@ -194,12 +239,24 @@ format, so a JSON-emission fallback for models without native tool support
 could be added later as an alternate implementation behind the same
 `agent.Agent` interface without touching the CLI or tools layer.
 
-Before building the tool registry, `main.go` calls `POST /api/show` for the
-selected model and checks whether it reports `vision` among its
-capabilities. That single boolean (`visionCapable`) controls whether
-`read_image` is included in `Registry.Definitions()` at all — a model without
-vision support never even sees the tool, rather than being offered a tool it
-would call blindly.
+Before building the tool registry, `main.go` calls `POST /api/show` once for
+the selected model (`ollama.Client.ShowModel`) and uses the result for two
+things:
+
+- Whether it reports `vision` among its capabilities controls whether
+  `read_image` is included in `Registry.Definitions()` at all — a model
+  without vision support never even sees the tool, rather than being offered
+  a tool it would call blindly.
+- Its reported context window (`model_info`'s `*.context_length` field) feeds
+  the rough context-usage warning described above.
+
+Note on audio: some models report an `audio` capability via `/api/show`
+(e.g. `gemma4:e4b`), but as of Ollama 0.31 the public `/api/chat` endpoint
+only documents an `images` field for multimodal input — there's no equivalent
+for attaching raw audio. So unlike `read_image`, there's currently no
+supported way to feed audio files straight into a chat message; that's why
+braai leans on pre-transcribed `.txt` files for meeting audio instead of a
+`read_audio` tool. Worth revisiting if Ollama adds that.
 
 ## Testing
 

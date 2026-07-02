@@ -194,7 +194,7 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 		fmt.Fprintf(s.verboseWriter, "warning: could not check capabilities for %s, assuming no vision support and no context-length warnings: %v\n", model, err)
 	}
 
-	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"))
+	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), s.client, model)
 	ag := agent.New(s.client, registry, agent.Options{
 		Model:         model,
 		MaxToolCalls:  s.maxToolCalls,

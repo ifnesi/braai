@@ -1,10 +1,12 @@
 // Package tools implements the fixed, read-only filesystem toolset the agent
 // may call: list_dir, read_file, read_files, read_image, search_name,
-// search_content, stat_file. All tools are confined to a security.Root and
-// never write to disk.
+// search_content, search_semantic, stat_file. All tools are confined to a
+// security.Root and never write to disk.
 package tools
 
 import (
+	"context"
+
 	"braai/internal/ollama"
 	"braai/internal/security"
 )
@@ -37,7 +39,8 @@ func textResult(s string) Result {
 type Limits struct {
 	// MaxReadBytes caps bytes returned by read_file/read_files. -1 means unlimited.
 	MaxReadBytes int
-	// MaxSearchFileBytes caps how many bytes of a single file search_content will scan.
+	// MaxSearchFileBytes caps how many bytes of a single file search_content or
+	// search_semantic will read.
 	MaxSearchFileBytes int64
 	// MaxSearchResults caps the number of matches search_content returns.
 	MaxSearchResults int
@@ -48,6 +51,13 @@ type Limits struct {
 	// MaxImageBytes caps the on-disk size of an image read_image will accept,
 	// since the whole file is base64-encoded and sent to the model.
 	MaxImageBytes int64
+	// MaxSemanticFiles caps how many files a single search_semantic call will
+	// embed and compare, to bound cost/latency on large trees.
+	MaxSemanticFiles int
+	// MaxSemanticResults caps how many ranked matches search_semantic returns.
+	MaxSemanticResults int
+	// MaxEmbedChars caps how much of a file's text is sent for embedding.
+	MaxEmbedChars int
 }
 
 // DefaultLimits returns sane defaults; MaxReadBytes follows the CLI default of -1 (no limit).
@@ -59,7 +69,17 @@ func DefaultLimits() Limits {
 		MaxNameResults:     500,
 		MaxBatchFiles:      20,
 		MaxImageBytes:      10 * 1024 * 1024, // 10MB
+		MaxSemanticFiles:   200,
+		MaxSemanticResults: 10,
+		MaxEmbedChars:      8000,
 	}
+}
+
+// embedder is the minimal interface search_semantic needs from an Ollama
+// client, kept small so tests can substitute a fake instead of hitting a
+// real server. *ollama.Client satisfies this via its Embed method.
+type embedder interface {
+	Embed(ctx context.Context, model string, inputs []string) ([][]float32, error)
 }
 
 // Registry executes tools against a confined root directory.
@@ -67,14 +87,37 @@ type Registry struct {
 	root          *security.Root
 	limits        Limits
 	visionCapable bool
+
+	embedClient embedder
+	embedModel  string
+	// embedCache holds one vector per file path, keyed by path, and is
+	// reused across search_semantic calls within the process's lifetime as
+	// long as the file's mtime hasn't changed — an all-in-memory,
+	// brute-force cache (no persistence, no vector DB).
+	embedCache map[string]embedCacheEntry
+}
+
+type embedCacheEntry struct {
+	modTime int64
+	vector  []float32
 }
 
 // NewRegistry builds a tool registry rooted at root, applying limits.
 // visionCapable indicates whether the active Ollama model reports "vision"
 // among its capabilities; read_image refuses to run when false rather than
-// silently sending image data a model can't use.
-func NewRegistry(root *security.Root, limits Limits, visionCapable bool) *Registry {
-	return &Registry{root: root, limits: limits, visionCapable: visionCapable}
+// silently sending image data a model can't use. embedClient/embedModel are
+// used by search_semantic; embedClient may be nil if the caller has no
+// Ollama client available, in which case search_semantic reports a clear
+// error instead of panicking.
+func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient embedder, embedModel string) *Registry {
+	return &Registry{
+		root:          root,
+		limits:        limits,
+		visionCapable: visionCapable,
+		embedClient:   embedClient,
+		embedModel:    embedModel,
+		embedCache:    make(map[string]embedCacheEntry),
+	}
 }
 
 // Definitions returns the Ollama tool schemas for all supported tools, in a
@@ -86,6 +129,7 @@ func (r *Registry) Definitions() []ollama.Tool {
 		readFilesDefinition(),
 		searchNameDefinition(),
 		searchContentDefinition(),
+		searchSemanticDefinition(),
 		statFileDefinition(),
 	}
 	if r.visionCapable {
@@ -95,8 +139,10 @@ func (r *Registry) Definitions() []ollama.Tool {
 }
 
 // Call dispatches a tool call by name with the given decoded arguments,
-// returning the result to feed back to the model.
-func (r *Registry) Call(name string, args map[string]any) (Result, error) {
+// returning the result to feed back to the model. Only search_semantic uses
+// ctx (for its embedding HTTP call); other tools ignore it since they're
+// local filesystem operations.
+func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (Result, error) {
 	switch name {
 	case "list_dir":
 		return r.listDir(args)
@@ -110,6 +156,8 @@ func (r *Registry) Call(name string, args map[string]any) (Result, error) {
 		return r.searchName(args)
 	case "search_content":
 		return r.searchContent(args)
+	case "search_semantic":
+		return r.searchSemantic(ctx, args)
 	case "stat_file":
 		return r.statFile(args)
 	default:

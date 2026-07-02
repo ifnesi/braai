@@ -167,7 +167,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		}
 
 		for _, tc := range resp.Message.ToolCalls {
-			result, callErr := a.executeTool(tc)
+			result, callErr := a.executeTool(ctx, tc)
 			if a.opts.Verbose {
 				a.logToolCall(tc, result, callErr)
 			}
@@ -221,8 +221,8 @@ func estimateContextUsage(history []ollama.Message, contextLength int) (tokens i
 	return tokens, ratio
 }
 
-func (a *Agent) executeTool(tc ollama.ToolCall) (tools.Result, error) {
-	return a.registry.Call(tc.Function.Name, tc.Function.Arguments)
+func (a *Agent) executeTool(ctx context.Context, tc ollama.ToolCall) (tools.Result, error) {
+	return a.registry.Call(ctx, tc.Function.Name, tc.Function.Arguments)
 }
 
 func (a *Agent) logToolCall(tc ollama.ToolCall, result tools.Result, err error) {

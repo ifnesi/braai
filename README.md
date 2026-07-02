@@ -168,6 +168,18 @@ The agent can only call the tools below, all confined to `--working-dir`:
 - **search_content** — plain-text search over file contents, returning file
   path, line number, and a short excerpt per match. Skips binary and
   oversized files.
+- **search_semantic** — search files by *meaning* rather than exact text,
+  using Ollama embeddings (e.g. "find notes about the pricing decision" even
+  if those exact words never appear). Ranks whole files by cosine similarity
+  to the query. This is a brute-force, all-in-memory implementation: no
+  vector database, no persistence — embeddings for files are computed lazily
+  on first use and cached in memory (keyed by path + mtime) for the lifetime
+  of the process, so repeated searches in one chat session don't recompute
+  them. Requires the Ollama server to actually support embeddings (some
+  builds need to be started with an embeddings flag); if it doesn't, the
+  tool returns a clear error and the model is expected to fall back to
+  `search_content`. Slower and coarser-grained (whole-file, not per-chunk)
+  than `search_content`, so prefer `search_content` for known substrings.
 - **stat_file** — metadata: type, size, modification time, permissions,
   extension.
 - **read_image** — read a PNG/JPG/JPEG/GIF/WEBP and attach it to the
@@ -266,5 +278,9 @@ go test ./...
 
 Unit tests cover path validation (traversal, absolute paths, symlink escape)
 in `internal/security` and tool behavior (binary refusal, content/name
-search, stat, directory listing, batch reads, extension/sort filters, and
-`read_image`'s vision-capability gating) in `internal/tools`.
+search, stat, directory listing, batch reads, extension/sort filters,
+`read_image`'s vision-capability gating, and `search_semantic`'s ranking,
+embedding cache, and error surfacing) in `internal/tools`. The
+`search_semantic` tests use a small in-memory fake embedder (an `embedder`
+interface satisfied by `*ollama.Client`) so they don't need a real Ollama
+server or model.

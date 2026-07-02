@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,43 @@ import (
 
 	"braai/internal/security"
 )
+
+// fakeEmbedder is a minimal in-memory stand-in for *ollama.Client's Embed
+// method, so search_semantic tests don't need a real Ollama server. It
+// returns a deterministic vector per distinct input string and counts calls
+// so tests can verify the embedding cache is actually being used.
+type fakeEmbedder struct {
+	calls     int
+	failWith  error
+	vectorFor func(input string) []float32
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, _ string, inputs []string) ([][]float32, error) {
+	f.calls++
+	if f.failWith != nil {
+		return nil, f.failWith
+	}
+	out := make([][]float32, len(inputs))
+	for i, in := range inputs {
+		if f.vectorFor != nil {
+			out[i] = f.vectorFor(in)
+		} else {
+			out[i] = hashVector(in)
+		}
+	}
+	return out, nil
+}
+
+// hashVector derives a small deterministic vector from a string so identical
+// or similar inputs naturally produce similar (or identical) vectors,
+// without needing a real embedding model.
+func hashVector(s string) []float32 {
+	v := make([]float32, 8)
+	for i, c := range s {
+		v[i%len(v)] += float32(c)
+	}
+	return v
+}
 
 func setupRegistry(t *testing.T, visionCapable bool) *Registry {
 	t.Helper()
@@ -34,7 +73,7 @@ func setupRegistry(t *testing.T, visionCapable bool) *Registry {
 	if err != nil {
 		t.Fatalf("NewRoot: %v", err)
 	}
-	return NewRegistry(root, DefaultLimits(), visionCapable)
+	return NewRegistry(root, DefaultLimits(), visionCapable, &fakeEmbedder{}, "fake-embed-model")
 }
 
 func must(t *testing.T, err error) {
@@ -44,9 +83,14 @@ func must(t *testing.T, err error) {
 	}
 }
 
+func call(t *testing.T, r *Registry, name string, args map[string]any) (Result, error) {
+	t.Helper()
+	return r.Call(context.Background(), name, args)
+}
+
 func TestListDir(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("list_dir", map[string]any{"path": "."})
+	out, err := call(t, r, "list_dir", map[string]any{"path": "."})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,7 +105,7 @@ func TestListDir(t *testing.T) {
 
 func TestListDirExtensionFilter(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("list_dir", map[string]any{"path": ".", "extensions": []any{".md"}})
+	out, err := call(t, r, "list_dir", map[string]any{"path": ".", "extensions": []any{".md"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -89,9 +133,9 @@ func TestListDirSortByModifiedTime(t *testing.T) {
 
 	root, err := security.NewRoot(dir)
 	must(t, err)
-	r := NewRegistry(root, DefaultLimits(), false)
+	r := NewRegistry(root, DefaultLimits(), false, &fakeEmbedder{}, "fake-embed-model")
 
-	out, err := r.Call("list_dir", map[string]any{"path": ".", "sort_by": "modified_time"})
+	out, err := call(t, r, "list_dir", map[string]any{"path": ".", "sort_by": "modified_time"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,7 +148,7 @@ func TestListDirSortByModifiedTime(t *testing.T) {
 
 func TestReadFileRefusesBinary(t *testing.T) {
 	r := setupRegistry(t, false)
-	_, err := r.Call("read_file", map[string]any{"path": "binary.bin"})
+	_, err := call(t, r, "read_file", map[string]any{"path": "binary.bin"})
 	if err == nil {
 		t.Fatal("expected error reading binary file")
 	}
@@ -112,7 +156,7 @@ func TestReadFileRefusesBinary(t *testing.T) {
 
 func TestReadFileReturnsContent(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("read_file", map[string]any{"path": "sub/file.txt"})
+	out, err := call(t, r, "read_file", map[string]any{"path": "sub/file.txt"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +167,7 @@ func TestReadFileReturnsContent(t *testing.T) {
 
 func TestReadFileRejectsTraversal(t *testing.T) {
 	r := setupRegistry(t, false)
-	_, err := r.Call("read_file", map[string]any{"path": "../../etc/passwd"})
+	_, err := call(t, r, "read_file", map[string]any{"path": "../../etc/passwd"})
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
@@ -131,7 +175,7 @@ func TestReadFileRejectsTraversal(t *testing.T) {
 
 func TestReadFilesBatch(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("read_files", map[string]any{"paths": []any{"sub/file.txt", "top.txt"}})
+	out, err := call(t, r, "read_files", map[string]any{"paths": []any{"sub/file.txt", "top.txt"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +186,7 @@ func TestReadFilesBatch(t *testing.T) {
 
 func TestReadFilesBatchReportsPerFileErrors(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("read_files", map[string]any{"paths": []any{"top.txt", "does-not-exist.txt"}})
+	out, err := call(t, r, "read_files", map[string]any{"paths": []any{"top.txt", "does-not-exist.txt"}})
 	if err != nil {
 		t.Fatalf("unexpected top-level error: %v", err)
 	}
@@ -160,7 +204,7 @@ func TestReadFilesBatchRejectsTooMany(t *testing.T) {
 	for i := range paths {
 		paths[i] = "top.txt"
 	}
-	_, err := r.Call("read_files", map[string]any{"paths": paths})
+	_, err := call(t, r, "read_files", map[string]any{"paths": paths})
 	if err == nil {
 		t.Fatal("expected error for exceeding max batch files")
 	}
@@ -168,7 +212,7 @@ func TestReadFilesBatchRejectsTooMany(t *testing.T) {
 
 func TestReadImageRequiresVisionCapability(t *testing.T) {
 	r := setupRegistry(t, false)
-	_, err := r.Call("read_image", map[string]any{"path": "screenshot.png"})
+	_, err := call(t, r, "read_image", map[string]any{"path": "screenshot.png"})
 	if err == nil {
 		t.Fatal("expected error when model is not vision-capable")
 	}
@@ -176,7 +220,7 @@ func TestReadImageRequiresVisionCapability(t *testing.T) {
 
 func TestReadImageReturnsBase64WhenVisionCapable(t *testing.T) {
 	r := setupRegistry(t, true)
-	out, err := r.Call("read_image", map[string]any{"path": "screenshot.png"})
+	out, err := call(t, r, "read_image", map[string]any{"path": "screenshot.png"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +231,7 @@ func TestReadImageReturnsBase64WhenVisionCapable(t *testing.T) {
 
 func TestReadImageRejectsNonImageExtension(t *testing.T) {
 	r := setupRegistry(t, true)
-	_, err := r.Call("read_image", map[string]any{"path": "top.txt"})
+	_, err := call(t, r, "read_image", map[string]any{"path": "top.txt"})
 	if err == nil {
 		t.Fatal("expected error for non-image extension")
 	}
@@ -195,7 +239,7 @@ func TestReadImageRejectsNonImageExtension(t *testing.T) {
 
 func TestSearchName(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("search_name", map[string]any{"pattern": "FILE"})
+	out, err := call(t, r, "search_name", map[string]any{"pattern": "FILE"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +250,7 @@ func TestSearchName(t *testing.T) {
 
 func TestSearchNameExtensionFilter(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("search_name", map[string]any{"pattern": "e", "extensions": []any{".md"}})
+	out, err := call(t, r, "search_name", map[string]any{"pattern": "e", "extensions": []any{".md"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,7 +261,7 @@ func TestSearchNameExtensionFilter(t *testing.T) {
 
 func TestSearchContent(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("search_content", map[string]any{"query": "kafka"})
+	out, err := call(t, r, "search_content", map[string]any{"query": "kafka"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,7 +272,7 @@ func TestSearchContent(t *testing.T) {
 
 func TestStatFile(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := r.Call("stat_file", map[string]any{"path": "top.txt"})
+	out, err := call(t, r, "stat_file", map[string]any{"path": "top.txt"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -260,5 +304,105 @@ func TestDefinitionsIncludeReadImageWithVision(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected read_image to be advertised when model has vision support")
+	}
+}
+
+func TestDefinitionsAlwaysIncludeSearchSemantic(t *testing.T) {
+	r := setupRegistry(t, false)
+	found := false
+	for _, d := range r.Definitions() {
+		if d.Function.Name == "search_semantic" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected search_semantic to always be advertised")
+	}
+}
+
+func TestSearchSemanticRequiresEmbedClient(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644))
+	root, err := security.NewRoot(dir)
+	must(t, err)
+	r := NewRegistry(root, DefaultLimits(), false, nil, "")
+
+	_, err = call(t, r, "search_semantic", map[string]any{"query": "hello"})
+	if err == nil {
+		t.Fatal("expected error when no embed client is configured")
+	}
+}
+
+func TestSearchSemanticRanksBySimilarity(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "about_cats.txt"), []byte("cats"), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "about_dogs.txt"), []byte("dogs"), 0o644))
+	root, err := security.NewRoot(dir)
+	must(t, err)
+
+	// A fake embedder where "cats"/"about cats" land near each other and far
+	// from "dogs", so we can assert on ranking without a real model.
+	fake := &fakeEmbedder{vectorFor: func(input string) []float32 {
+		if strings.Contains(strings.ToLower(input), "cat") {
+			return []float32{1, 0}
+		}
+		return []float32{0, 1}
+	}}
+	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+
+	out, err := call(t, r, "search_semantic", map[string]any{"query": "tell me about cats"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed struct {
+		Matches []semanticMatch `json:"matches"`
+	}
+	must(t, json.Unmarshal([]byte(out.Text), &parsed))
+	if len(parsed.Matches) != 2 {
+		t.Fatalf("expected 2 matches, got %d: %+v", len(parsed.Matches), parsed.Matches)
+	}
+	if parsed.Matches[0].Path != "about_cats.txt" {
+		t.Fatalf("expected about_cats.txt ranked first, got: %+v", parsed.Matches)
+	}
+	if parsed.Matches[0].Score <= parsed.Matches[1].Score {
+		t.Fatalf("expected top match to have a higher score: %+v", parsed.Matches)
+	}
+}
+
+func TestSearchSemanticCachesEmbeddingsAcrossCalls(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello world"), 0o644))
+	root, err := security.NewRoot(dir)
+	must(t, err)
+
+	fake := &fakeEmbedder{}
+	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+
+	_, err = call(t, r, "search_semantic", map[string]any{"query": "greeting"})
+	must(t, err)
+	firstCalls := fake.calls
+
+	_, err = call(t, r, "search_semantic", map[string]any{"query": "greeting again"})
+	must(t, err)
+
+	// Second call should only re-embed the query, not re-embed a.txt (whose
+	// mtime hasn't changed), so total calls should grow by exactly 1.
+	if fake.calls != firstCalls+1 {
+		t.Fatalf("expected file embedding to be cached: first=%d second=%d", firstCalls, fake.calls)
+	}
+}
+
+func TestSearchSemanticSurfacesEmbedError(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644))
+	root, err := security.NewRoot(dir)
+	must(t, err)
+
+	fake := &fakeEmbedder{failWith: fmt.Errorf("ollama error: This server does not support embeddings")}
+	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+
+	_, err = call(t, r, "search_semantic", map[string]any{"query": "hello"})
+	if err == nil || !strings.Contains(err.Error(), "does not support embeddings") {
+		t.Fatalf("expected embed error to be surfaced, got: %v", err)
 	}
 }

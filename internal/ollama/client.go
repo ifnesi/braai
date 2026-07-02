@@ -318,3 +318,66 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	}
 	return names, nil
 }
+
+// embedRequest is the body sent to POST /api/embed.
+type embedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+// embedResponse mirrors the fields we need from POST /api/embed.
+type embedResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
+	Error      string      `json:"error"`
+}
+
+// Embed returns one embedding vector per input string, in the same order,
+// via POST /api/embed. Not every model or server supports this — a server
+// started without embedding support returns a clear error message that is
+// passed through as-is, since it already explains the fix (e.g. "This
+// server does not support embeddings. Start it with `--embeddings`").
+func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
+	body, err := json.Marshal(embedRequest{Model: model, Input: inputs})
+	if err != nil {
+		return nil, fmt.Errorf("encode embed request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embed", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build embed request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("calling ollama at %s: %w (is `ollama serve` running?)", c.baseURL, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read ollama response: %w", err)
+	}
+
+	var embed embedResponse
+	if resp.StatusCode != http.StatusOK {
+		// Error responses (e.g. 501 when the server wasn't started with
+		// embedding support) still carry a JSON {"error": "..."} body with a
+		// clear, actionable message; surface that instead of the raw body.
+		if jsonErr := json.Unmarshal(data, &embed); jsonErr == nil && embed.Error != "" {
+			return nil, fmt.Errorf("ollama error: %s", embed.Error)
+		}
+		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(data))
+	}
+
+	if err := json.Unmarshal(data, &embed); err != nil {
+		return nil, fmt.Errorf("decode embed response: %w", err)
+	}
+	if embed.Error != "" {
+		return nil, fmt.Errorf("ollama error: %s", embed.Error)
+	}
+	if len(embed.Embeddings) != len(inputs) {
+		return nil, fmt.Errorf("ollama returned %d embeddings for %d inputs", len(embed.Embeddings), len(inputs))
+	}
+	return embed.Embeddings, nil
+}

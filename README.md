@@ -98,7 +98,7 @@ models are installed at all, it exits with an error instead of starting.
 |---|---|---|
 | `--model` | first available | Ollama model to use |
 | `--working-dir` | `.` | Root directory the agent may inspect |
-| `--ollama-host` / `--ollama-url` | `http://localhost:11434` | Ollama server base URL |
+| `--ollama-host` | `http://localhost:11434` | Ollama server base URL |
 | `--prompt` | — | Run one prompt non-interactively (trailing args work the same way) |
 | `--verbose` | `false` | Print tool calls and intermediate steps to stderr |
 | `--show-reasoning` | `false` | Stream the model's reasoning/thinking trace (on models that support it) before its answer |

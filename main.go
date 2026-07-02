@@ -36,7 +36,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	var (
 		ollamaHost    = fs.String("ollama-host", "", "Ollama server base URL (default http://localhost:11434, or ~/.braai/settings.json)")
-		ollamaURL     = fs.String("ollama-url", "", "Alias for --ollama-host")
 		model         = fs.String("model", "", "Ollama model name to use (default: first model available on the server)")
 		workingDir    = fs.String("working-dir", "", "Root directory the agent may inspect (default: current directory)")
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
@@ -58,6 +57,11 @@ Flags:
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// -h/-help: usage was already printed by fs.Usage(); exit cleanly
+			// rather than surfacing "flag: help requested" as an error.
+			return nil
+		}
 		return err
 	}
 
@@ -71,7 +75,7 @@ Flags:
 		return fmt.Errorf("load settings: %w", err)
 	}
 
-	host := firstNonEmpty(*ollamaHost, *ollamaURL, settings.OllamaHost, "http://localhost:11434")
+	host := firstNonEmpty(*ollamaHost, settings.OllamaHost, "http://localhost:11434")
 	dir := *workingDir
 	if dir == "" {
 		dir = "."

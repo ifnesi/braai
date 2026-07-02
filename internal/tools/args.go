@@ -57,3 +57,24 @@ func optionalBoolArg(args map[string]any, key string, def bool) bool {
 	}
 	return b
 }
+
+// stringSliceArg extracts an optional array-of-strings argument, ignoring
+// non-string elements rather than failing the whole call. Returns nil if
+// absent or not an array.
+func stringSliceArg(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}

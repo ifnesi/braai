@@ -26,6 +26,11 @@ func searchNameDefinition() ollama.Tool {
 						"type":        "boolean",
 						"description": "If true, match case-sensitively. Default false.",
 					},
+					"extensions": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Optional list of file extensions to restrict matches to, e.g. [\".md\", \".txt\"]. Directories are always eligible regardless of this filter. Case-insensitive.",
+					},
 				},
 				"required": []string{"pattern"},
 			},
@@ -33,12 +38,13 @@ func searchNameDefinition() ollama.Tool {
 	}
 }
 
-func (r *Registry) searchName(args map[string]any) (string, error) {
+func (r *Registry) searchName(args map[string]any) (Result, error) {
 	pattern, err := stringArg(args, "pattern")
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	caseSensitive := optionalBoolArg(args, "case_sensitive", false)
+	extensions := stringSliceArg(args, "extensions")
 
 	needle := pattern
 	if !caseSensitive {
@@ -56,6 +62,9 @@ func (r *Registry) searchName(args map[string]any) (string, error) {
 		if d.IsDir() && skipDirNames[d.Name()] {
 			return filepath.SkipDir
 		}
+		if !d.IsDir() && !extensionMatches(d.Name(), extensions) {
+			return nil
+		}
 		name := d.Name()
 		if !caseSensitive {
 			name = strings.ToLower(name)
@@ -69,7 +78,7 @@ func (r *Registry) searchName(args map[string]any) (string, error) {
 		return nil
 	})
 	if err != nil && err != errStopWalk {
-		return "", err
+		return Result{}, err
 	}
 
 	truncated := len(matches) >= r.limits.MaxNameResults
@@ -78,7 +87,7 @@ func (r *Registry) searchName(args map[string]any) (string, error) {
 		Truncated bool     `json:"truncated,omitempty"`
 	}{Matches: matches, Truncated: truncated}, "", "  ")
 	if jsonErr != nil {
-		return "", jsonErr
+		return Result{}, jsonErr
 	}
-	return string(out), nil
+	return textResult(string(out)), nil
 }

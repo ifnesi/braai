@@ -38,20 +38,20 @@ type statResult struct {
 	Extension   string `json:"extension,omitempty"`
 }
 
-func (r *Registry) statFile(args map[string]any) (string, error) {
+func (r *Registry) statFile(args map[string]any) (Result, error) {
 	relPath, err := stringArg(args, "path")
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	absPath, err := r.root.Resolve(relPath)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	info, err := os.Lstat(absPath)
 	if err != nil {
-		return "", fmt.Errorf("stat %q: %w", relPath, err)
+		return Result{}, fmt.Errorf("stat %q: %w", relPath, err)
 	}
 
 	entryType := "file"
@@ -77,7 +77,7 @@ func (r *Registry) statFile(args map[string]any) (string, error) {
 
 	out, jsonErr := json.MarshalIndent(result, "", "  ")
 	if jsonErr != nil {
-		return "", jsonErr
+		return Result{}, jsonErr
 	}
-	return string(out), nil
+	return textResult(string(out)), nil
 }

@@ -37,14 +37,25 @@ func readFileDefinition() ollama.Tool {
 	}
 }
 
-func (r *Registry) readFile(args map[string]any) (string, error) {
+func (r *Registry) readFile(args map[string]any) (Result, error) {
 	relPath, err := stringArg(args, "path")
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	startLine := optionalIntArg(args, "start_line", 0)
 	endLine := optionalIntArg(args, "end_line", 0)
 
+	text, err := r.readFileText(relPath, startLine, endLine)
+	if err != nil {
+		return Result{}, err
+	}
+	return textResult(text), nil
+}
+
+// readFileText reads and line-numbers a single text file, honoring the
+// registry's MaxReadBytes limit and an optional 1-based, inclusive line
+// range. It is shared by the read_file and read_files tools.
+func (r *Registry) readFileText(relPath string, startLine, endLine int) (string, error) {
 	absPath, err := r.root.Resolve(relPath)
 	if err != nil {
 		return "", err
@@ -78,7 +89,6 @@ func (r *Registry) readFile(args map[string]any) (string, error) {
 
 	lineNum := 0
 	truncatedByBytes := false
-	truncatedByRange := false
 	written := 0
 
 	for scanner.Scan() {
@@ -87,7 +97,6 @@ func (r *Registry) readFile(args map[string]any) (string, error) {
 			continue
 		}
 		if endLine > 0 && lineNum > endLine {
-			truncatedByRange = false // exited normally due to range end, not a truncation
 			break
 		}
 		line := fmt.Sprintf("%6d\t%s\n", lineNum, scanner.Text())
@@ -109,7 +118,7 @@ func (r *Registry) readFile(args map[string]any) (string, error) {
 	if truncatedByBytes {
 		result += fmt.Sprintf("\n[truncated: reached max-read-bytes limit of %d]\n", r.limits.MaxReadBytes)
 	}
-	if truncatedByRange && endLine > 0 {
+	if endLine > 0 && lineNum > endLine {
 		result += fmt.Sprintf("\n[stopped at requested end_line %d]\n", endLine)
 	}
 	return result, nil

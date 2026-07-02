@@ -3,9 +3,16 @@
 `braai` is a small, read-only AI agent CLI that answers questions about a local
 working directory. It uses a local [Ollama](https://ollama.com) server for
 reasoning and lets the model call a fixed set of read-only filesystem tools
-(list, read, search by name, search by content, stat) to gather evidence
-before answering. It never writes, deletes, or executes anything on your
-filesystem.
+(list, read, batch-read, search by name, search by content, stat, and —
+on vision-capable models — read/OCR images) to gather evidence before
+answering. It never writes, deletes, or executes anything on your filesystem.
+
+It works well as a local research assistant over a folder of meeting notes and
+audio transcripts, e.g. `braai --working-dir ~/notes/2026-Q3 "summarize this
+week's meetings and flag any action items"` — see
+[Read-only toolset](#read-only-toolset) for the tools it uses to do that.
+
+![Image](img/braai.png)
 
 ## Requirements
 
@@ -92,7 +99,7 @@ models are installed at all, it exits with an error instead of starting.
 | `--prompt` | — | Run one prompt non-interactively (trailing args work the same way) |
 | `--verbose` | `false` | Print tool calls and intermediate steps to stderr |
 | `--show-reasoning` | `false` | Stream the model's reasoning/thinking trace (on models that support it) before its answer |
-| `--max-tool-calls` | `8` | Max tool calls allowed per request before aborting |
+| `--max-tool-calls` | `100` | Max tool calls allowed per request before aborting |
 | `--max-read-bytes` | `-1` (no limit) | Max bytes `read_file` will return |
 | `--version` | — | Print the braai version and exit |
 
@@ -104,18 +111,33 @@ Command-line flags always take precedence over this file.
 
 ## Read-only toolset
 
-The agent can only call these five tools, all confined to `--working-dir`:
+The agent can only call the tools below, all confined to `--working-dir`:
 
-- **list_dir** — list entries in a directory, with optional recursion depth.
+- **list_dir** — list entries in a directory. Supports recursion depth, an
+  `extensions` filter (e.g. only `.md`/`.txt`), and `sort_by: modified_time`
+  to surface the most recently changed files first (handy for "find this
+  week's meeting notes").
 - **read_file** — read a text file, with optional line ranges and a
   configurable max-bytes truncation. Refuses binary files.
+- **read_files** — read several text files in a single call (e.g. a batch of
+  meeting notes to summarize together), instead of one `read_file` call per
+  file. Capped at 20 files per call; per-file errors are reported inline
+  without failing the whole batch.
 - **search_name** — case-insensitive (by default) substring search over file
-  and directory names.
+  and directory names, with an optional `extensions` filter.
 - **search_content** — plain-text search over file contents, returning file
   path, line number, and a short excerpt per match. Skips binary and
   oversized files.
 - **stat_file** — metadata: type, size, modification time, permissions,
   extension.
+- **read_image** — read a PNG/JPG/JPEG/GIF/WEBP and attach it to the
+  conversation for the model to visually inspect (OCR text, describe a
+  diagram or screenshot, etc.). **Only advertised to the model when the
+  active model reports `vision` in its Ollama capabilities** (check with
+  `ollama show <model>`; e.g. `llama3.2-vision`, `qwen2.5vl`, `gemma3`,
+  `moondream` all support this). On a non-vision model, the tool isn't
+  offered at all, so the model won't try to "imagine" an image's contents.
+  Images are capped at 10MB on disk.
 
 There are no write, delete, rename, mkdir, chmod, or shell-execution tools —
 this is intentional and hardcoded, not something that can be enabled.
@@ -143,20 +165,22 @@ tool, so there is no path by which the agent can modify your filesystem.
 ## Architecture
 
 ```
-main.go                    CLI flag parsing, stdin/interactive wiring
-internal/agent/agent.go    Chat + tool-calling loop, system prompt
-internal/ollama/client.go  Minimal /api/chat and /api/tags HTTP client
-internal/tools/            The five read-only tools + their JSON schemas
+main.go                    CLI flag parsing, stdin/interactive wiring, model capability check
+internal/agent/agent.go    Chat + tool-calling loop, system prompt, streaming output
+internal/ollama/client.go  Minimal /api/chat, /api/tags, /api/show HTTP client
+internal/tools/            The read-only tools + their JSON schemas
 internal/security/path.go  Path confinement/validation helpers
 internal/config/config.go  ~/.braai/settings.json persistence
 ```
 
 The agent loop (`internal/agent/agent.go`) is intentionally simple:
 
-1. Send the running message history plus the tool schemas to `/api/chat`.
+1. Send the running message history plus the tool schemas to `/api/chat`
+   (streamed, so output starts appearing as soon as the model produces it).
 2. If the model's response includes tool calls, execute each one against the
    `tools.Registry` (which enforces the working-directory confinement) and
-   append the results as `tool` role messages.
+   append the results as `tool` role messages — including any attached
+   images from `read_image`.
 3. Repeat until the model returns a plain text answer or a configurable
    `--max-tool-calls` guardrail is hit.
 
@@ -167,6 +191,13 @@ format, so a JSON-emission fallback for models without native tool support
 could be added later as an alternate implementation behind the same
 `agent.Agent` interface without touching the CLI or tools layer.
 
+Before building the tool registry, `main.go` calls `POST /api/show` for the
+selected model and checks whether it reports `vision` among its
+capabilities. That single boolean (`visionCapable`) controls whether
+`read_image` is included in `Registry.Definitions()` at all — a model without
+vision support never even sees the tool, rather than being offered a tool it
+would call blindly.
+
 ## Testing
 
 ```sh
@@ -175,4 +206,5 @@ go test ./...
 
 Unit tests cover path validation (traversal, absolute paths, symlink escape)
 in `internal/security` and tool behavior (binary refusal, content/name
-search, stat, directory listing) in `internal/tools`.
+search, stat, directory listing, batch reads, extension/sort filters, and
+`read_image`'s vision-capability gating) in `internal/tools`.

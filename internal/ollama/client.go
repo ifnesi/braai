@@ -36,6 +36,9 @@ type Message struct {
 	Thinking  string     `json:"thinking,omitempty"` // model's reasoning trace, if the model/request supports it
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	ToolName  string     `json:"tool_name,omitempty"` // set on role "tool" responses
+	// Images holds raw base64-encoded image data (no data: URI prefix) for
+	// multimodal/vision-capable models to inspect alongside Content.
+	Images []string `json:"images,omitempty"`
 }
 
 // ToolCall is a single tool invocation requested by the model.
@@ -199,6 +202,46 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onChunk func(C
 	final.Message.Thinking = thinking.String()
 	final.Message.ToolCalls = toolCalls
 	return &final, nil
+}
+
+// showResponse mirrors the fields we need from POST /api/show.
+type showResponse struct {
+	Capabilities []string `json:"capabilities"`
+}
+
+// ModelCapabilities returns the capability strings Ollama reports for a
+// model (e.g. "completion", "tools", "vision", "thinking"), via /api/show.
+func (c *Client) ModelCapabilities(ctx context.Context, model string) ([]string, error) {
+	body, err := json.Marshal(map[string]string{"model": model})
+	if err != nil {
+		return nil, fmt.Errorf("encode show request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build show request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("calling ollama at %s: %w (is `ollama serve` running?)", c.baseURL, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read ollama response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(data))
+	}
+
+	var show showResponse
+	if err := json.Unmarshal(data, &show); err != nil {
+		return nil, fmt.Errorf("decode show response: %w", err)
+	}
+	return show.Capabilities, nil
 }
 
 // tagsResponse mirrors GET /api/tags.

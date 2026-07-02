@@ -42,7 +42,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
 		verbose       = fs.Bool("verbose", false, "Print tool calls and intermediate steps")
 		showReasoning = fs.Bool("show-reasoning", false, "Stream the model's reasoning/thinking trace before its answer, on models that support it")
-		maxToolCalls  = fs.Int("max-tool-calls", 8, "Maximum number of tool calls per request")
+		maxToolCalls  = fs.Int("max-tool-calls", agent.DefaultMaxToolCalls, "Maximum number of tool calls per request")
 		maxReadBytes  = fs.Int("max-read-bytes", -1, "Maximum bytes read_file returns (-1 = no limit)")
 		showVersion   = fs.Bool("version", false, "Print the braai version and exit")
 	)
@@ -98,9 +98,14 @@ Flags:
 		fmt.Fprintf(stderr, "warning: could not save settings: %v\n", err)
 	}
 
+	visionCapable, err := modelSupportsVision(ctx, client, selectedModel)
+	if err != nil && *verbose {
+		fmt.Fprintf(stderr, "warning: could not check model capabilities, assuming no vision support: %v\n", err)
+	}
+
 	limits := tools.DefaultLimits()
 	limits.MaxReadBytes = *maxReadBytes
-	registry := tools.NewRegistry(root, limits)
+	registry := tools.NewRegistry(root, limits, visionCapable)
 
 	ag := agent.New(client, registry, agent.Options{
 		Model:         selectedModel,
@@ -154,6 +159,23 @@ func resolveModel(ctx context.Context, client *ollama.Client, flagModel string, 
 		}
 	}
 	return available[0], nil
+}
+
+// modelSupportsVision reports whether the given model advertises "vision"
+// among its capabilities via /api/show. Errors are returned so the caller
+// can decide how to surface them, but a failed check is treated as "no
+// vision support" rather than aborting the whole run.
+func modelSupportsVision(ctx context.Context, client *ollama.Client, model string) (bool, error) {
+	caps, err := client.ModelCapabilities(ctx, model)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range caps {
+		if c == "vision" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // runOnce executes a single prompt. The answer is streamed directly to

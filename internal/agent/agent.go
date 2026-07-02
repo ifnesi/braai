@@ -23,14 +23,19 @@ using the tools provided. Rules you must follow:
    have not seen something via a tool call, you do not know it.
 3. Use tools whenever you need evidence to answer accurately. Prefer the
    minimum number of tool calls needed — do not call a tool "just in case" if
-   you already have enough information.
+   you already have enough information. When you already know which several
+   files you need (e.g. summarizing a batch of meeting notes), prefer
+   read_files over multiple individual read_file calls.
 4. Stay within the fixed toolset you are given: list_dir, read_file,
-   search_name, search_content, stat_file. There are no other capabilities.
+   read_files, search_name, search_content, stat_file, and (only on
+   vision-capable models) read_image. There are no other capabilities.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.
 6. If a tool call fails or a file cannot be found, say so plainly rather than
-   guessing.`
+   guessing.
+7. If read_image is available and the user asks about a screenshot, diagram,
+   or photo, use it rather than guessing at an image's contents from its name.`
 
 // Options configures a single agent run.
 type Options struct {
@@ -56,10 +61,13 @@ type Agent struct {
 	opts     Options
 }
 
+// DefaultMaxToolCalls is used when Options.MaxToolCalls is left unset.
+const DefaultMaxToolCalls = 100
+
 // New builds an Agent bound to the given Ollama client and tool registry.
 func New(client *ollama.Client, registry *tools.Registry, opts Options) *Agent {
 	if opts.MaxToolCalls <= 0 {
-		opts.MaxToolCalls = 8
+		opts.MaxToolCalls = DefaultMaxToolCalls
 	}
 	return &Agent{client: client, registry: registry, opts: opts}
 }
@@ -116,7 +124,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 			if a.opts.Verbose {
 				a.logToolCall(tc, result, callErr)
 			}
-			content := result
+			content := result.Text
 			if callErr != nil {
 				content = fmt.Sprintf("error: %v", callErr)
 			}
@@ -124,6 +132,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 				Role:     "tool",
 				Content:  content,
 				ToolName: tc.Function.Name,
+				Images:   result.Images,
 			})
 		}
 	}
@@ -131,21 +140,24 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 	return "", history, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
 }
 
-func (a *Agent) executeTool(tc ollama.ToolCall) (string, error) {
+func (a *Agent) executeTool(tc ollama.ToolCall) (tools.Result, error) {
 	return a.registry.Call(tc.Function.Name, tc.Function.Arguments)
 }
 
-func (a *Agent) logToolCall(tc ollama.ToolCall, result string, err error) {
+func (a *Agent) logToolCall(tc ollama.ToolCall, result tools.Result, err error) {
 	argsJSON, _ := json.Marshal(tc.Function.Arguments)
 	fmt.Fprintf(a.opts.VerboseWriter, "  -> %s(%s)\n", tc.Function.Name, string(argsJSON))
 	if err != nil {
 		fmt.Fprintf(a.opts.VerboseWriter, "     error: %v\n", err)
 		return
 	}
-	preview := result
+	preview := result.Text
 	const maxPreview = 500
 	if len(preview) > maxPreview {
 		preview = preview[:maxPreview] + "...(truncated in log)"
 	}
 	fmt.Fprintf(a.opts.VerboseWriter, "     result: %s\n", preview)
+	if len(result.Images) > 0 {
+		fmt.Fprintf(a.opts.VerboseWriter, "     attached %d image(s)\n", len(result.Images))
+	}
 }

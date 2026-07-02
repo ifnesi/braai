@@ -40,10 +40,10 @@ type contentMatch struct {
 	Excerpt string `json:"excerpt"`
 }
 
-func (r *Registry) searchContent(args map[string]any) (string, error) {
+func (r *Registry) searchContent(args map[string]any) (Result, error) {
 	query, err := stringArg(args, "query")
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	caseSensitive := optionalBoolArg(args, "case_sensitive", false)
 
@@ -94,7 +94,7 @@ func (r *Registry) searchContent(args map[string]any) (string, error) {
 		return nil
 	})
 	if walkErr != nil && walkErr != errStopWalk {
-		return "", walkErr
+		return Result{}, walkErr
 	}
 
 	truncated := len(matches) >= r.limits.MaxSearchResults
@@ -104,9 +104,9 @@ func (r *Registry) searchContent(args map[string]any) (string, error) {
 		Truncated    bool           `json:"truncated,omitempty"`
 	}{Matches: matches, FilesScanned: filesScanned, Truncated: truncated}, "", "  ")
 	if jsonErr != nil {
-		return "", jsonErr
+		return Result{}, jsonErr
 	}
-	return string(out), nil
+	return textResult(string(out)), nil
 }
 
 // scanFileForMatches reads path line by line and returns up to maxResults matches.

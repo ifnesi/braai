@@ -18,11 +18,12 @@ import (
 	"braai/internal/config"
 	"braai/internal/ollama"
 	"braai/internal/security"
+	"braai/internal/terminal"
 	"braai/internal/tools"
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.2"
+const version = "0.0.3"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -117,13 +118,13 @@ Flags:
 	// In JSON mode, output is buffered and printed once as a single object
 	// rather than streamed, so the agent's streaming writer is discarded.
 	agentStdout := stdout
-	useColor := isInteractive(stdout)
+	colorLevel := terminal.Detect(stdout)
 	if jsonOutput {
 		agentStdout = io.Discard
-		useColor = false
+		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, *showReasoning, agentStdout, useColor, stderr)
+	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, *showReasoning, agentStdout, colorLevel, stderr)
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
@@ -161,7 +162,7 @@ type chatSession struct {
 	verbose       bool
 	showReasoning bool
 	stdout        io.Writer
-	useColor      bool
+	colorLevel    terminal.Level
 	verboseWriter io.Writer
 
 	model     string
@@ -170,7 +171,7 @@ type chatSession struct {
 	registry  *tools.Registry
 }
 
-func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, maxToolCalls int, verbose, showReasoning bool, stdout io.Writer, useColor bool, verboseWriter io.Writer) *chatSession {
+func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, maxToolCalls int, verbose, showReasoning bool, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
 	return &chatSession{
 		client:        client,
 		root:          root,
@@ -180,7 +181,7 @@ func newChatSession(client *ollama.Client, root *security.Root, limits tools.Lim
 		verbose:       verbose,
 		showReasoning: showReasoning,
 		stdout:        stdout,
-		useColor:      useColor,
+		colorLevel:    colorLevel,
 		verboseWriter: verboseWriter,
 	}
 }
@@ -202,7 +203,7 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 		VerboseWriter: s.verboseWriter,
 		ShowReasoning: s.showReasoning,
 		Stdout:        s.stdout,
-		UseColor:      s.useColor,
+		ColorLevel:    s.colorLevel,
 		ContextLength: info.ContextLength,
 	})
 
@@ -284,7 +285,7 @@ const maxHistoryEntries = 100
 // each answer is printed as a buffered JSON object instead of streamed text.
 // isTerminal controls whether /clear also wipes the visible screen (skipped
 // when stdout isn't a real terminal, to avoid emitting raw ANSI codes).
-func runChat(ctx context.Context, session *chatSession, jsonOutput, isTerminal bool) error {
+func runChat(ctx context.Context, session *chatSession, jsonOutput bool, isTerminal bool) error {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "> ",
 		HistoryFile:  historyFilePath(),
@@ -329,14 +330,18 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput, isTerminal b
 		// in JSON mode it was buffered (Stdout was io.Discard) and is
 		// printed here instead. session.ag is re-read fresh each turn since
 		// /model may have swapped it out.
+		sp := terminal.NewSpinner(rl.Stdout(), session.colorLevel)
+		session.ag.SetSpinner(sp)
+		sp.Start()
 		result, err := session.ag.Run(ctx, history)
 		if err != nil {
-			fmt.Fprintf(rl.Stdout(), "error: %v\n", err)
+			sp.Stop() // erase spinner before printing error
+			fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error: "+err.Error()))
 			continue
 		}
 		if jsonOutput {
 			if err := printJSONResult(rl.Stdout(), result); err != nil {
-				fmt.Fprintf(rl.Stdout(), "error encoding JSON output: %v\n", err)
+				fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error encoding JSON output: "+err.Error()))
 			}
 		}
 		history = result.History

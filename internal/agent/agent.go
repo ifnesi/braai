@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"braai/internal/ollama"
+	"braai/internal/terminal"
 	"braai/internal/tools"
 )
 
@@ -52,11 +53,14 @@ type Options struct {
 	// set) as it arrives from the model, token by token, rather than all at
 	// once when the response completes.
 	Stdout io.Writer
-	// UseColor enables ANSI styling (currently: dimming the reasoning trace
-	// so it reads as visually distinct from the final answer). Callers
+	// ColorLevel controls ANSI styling of the streamed output. Callers
 	// should only set this when Stdout is a real terminal, since ANSI codes
 	// would otherwise corrupt piped/redirected output.
-	UseColor bool
+	ColorLevel terminal.Level
+	// Spinner, when non-nil, is stopped (and erased from the terminal) the
+	// moment the first streamed token arrives. It should already be running
+	// before Run is called. Only meaningful in interactive mode.
+	Spinner *terminal.Spinner
 	// ContextLength is the active model's context window in tokens, as
 	// reported by Ollama's /api/show. When set (> 0), Run warns to
 	// VerboseWriter if the conversation looks likely to approach or exceed
@@ -80,6 +84,14 @@ func New(client *ollama.Client, registry *tools.Registry, opts Options) *Agent {
 		opts.MaxToolCalls = DefaultMaxToolCalls
 	}
 	return &Agent{client: client, registry: registry, opts: opts}
+}
+
+// SetSpinner sets the spinner that will be stopped when the first streamed
+// token arrives on the next Run call. It replaces any spinner set during
+// Options construction. Designed for interactive mode where a new spinner
+// is created per-turn.
+func (a *Agent) SetSpinner(sp *terminal.Spinner) {
+	a.opts.Spinner = sp
 }
 
 // SystemMessage returns the initial system message for a new conversation.
@@ -133,7 +145,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 			}
 		}
 
-		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.UseColor)
+		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.ColorLevel, a.opts.Spinner)
 
 		resp, err := a.client.ChatStream(ctx, ollama.ChatRequest{
 			Model:    a.opts.Model,

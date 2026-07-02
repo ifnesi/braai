@@ -75,7 +75,8 @@ The interactive chat supports standard readline-style line editing: left/right
 arrows to move within the line, Ctrl-A/Ctrl-E to jump to the start/end of the
 line, Ctrl-C to clear the current input (without exiting), Ctrl-D or
 `exit`/`quit` to leave, and up/down arrows to recall history from previous
-sessions (persisted to `~/.braai/chat_history`).
+sessions (persisted to `~/.braai/chat_history`, capped at the last 100
+entries — the file is trimmed to that limit every time braai starts).
 
 If `--model` is omitted, `braai` uses the first model reported by the Ollama
 server (preferring the last model you used, if it's still installed). If no

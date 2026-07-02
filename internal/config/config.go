@@ -10,9 +10,9 @@ import (
 // Settings is the persisted user configuration. Command-line flags always
 // take precedence over these values; they are only used as defaults/history.
 type Settings struct {
-	OllamaHost  string `json:"ollama_host,omitempty"`
-	Model       string `json:"model,omitempty"`
-	MaxToolCall int    `json:"max_tool_calls,omitempty"`
+	OllamaHost   string `json:"ollama_host,omitempty"`
+	Model        string `json:"model,omitempty"`
+	MaxToolCalls int    `json:"max_tool_calls,omitempty"`
 }
 
 // Dir returns the ~/.braai directory, creating it if necessary.

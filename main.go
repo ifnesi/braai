@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -42,7 +43,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		workingDir    = fs.String("working-dir", "", "Root directory the agent may inspect (default: current directory)")
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
 		verbose       = fs.Bool("verbose", false, "Print tool calls and intermediate steps")
-		showReasoning = fs.Bool("show-reasoning", false, "Stream the model's reasoning/thinking trace before its answer, on models that support it")
+		hideReasoning = fs.Bool("hide-reasoning", false, "Don't stream the model's reasoning/thinking trace before its answer (shown by default, on models that support it)")
 		maxToolCalls  = fs.Int("max-tool-calls", agent.DefaultMaxToolCalls, "Maximum number of tool calls per request")
 		maxReadBytes  = fs.Int("max-read-bytes", -1, "Maximum bytes read_file returns (-1 = no limit)")
 		showVersion   = fs.Bool("version", false, "Print the braai version and exit")
@@ -92,6 +93,10 @@ Flags:
 	if dir == "" {
 		dir = "."
 	}
+	dir, err = expandTilde(dir)
+	if err != nil {
+		return fmt.Errorf("invalid working directory: %w", err)
+	}
 
 	root, err := security.NewRoot(dir)
 	if err != nil {
@@ -110,7 +115,7 @@ Flags:
 	// time; the model itself is persisted by chatSession.switchModel below
 	// (also used at runtime by /model), so it isn't set here.
 	settings.OllamaHost = host
-	settings.MaxToolCall = *maxToolCalls
+	settings.MaxToolCalls = *maxToolCalls
 
 	limits := tools.DefaultLimits()
 	limits.MaxReadBytes = *maxReadBytes
@@ -124,7 +129,7 @@ Flags:
 		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, *showReasoning, agentStdout, colorLevel, stderr)
+	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, !*hideReasoning, agentStdout, colorLevel, stderr)
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
@@ -133,7 +138,7 @@ Flags:
 	trailing := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	initialPrompt := firstNonEmpty(*prompt, trailing)
 
-	if initialPrompt == "" && !isInteractive(stdin) {
+	if initialPrompt == "" && !terminal.IsTerminal(stdin) {
 		// stdin is piped and no explicit prompt/trailing args given: treat all of stdin as the prompt.
 		data, readErr := io.ReadAll(stdin)
 		if readErr != nil {
@@ -146,7 +151,7 @@ Flags:
 		return runOnce(ctx, session.ag, initialPrompt, stdout, jsonOutput)
 	}
 
-	return runChat(ctx, session, jsonOutput, isInteractive(stdout))
+	return runChat(ctx, session, jsonOutput)
 }
 
 // chatSession bundles everything needed to (re)build an agent for a given
@@ -283,9 +288,7 @@ const maxHistoryEntries = 100
 // or 'exit'/'quit' still leave the chat). A few slash-commands are also
 // available: /clear, /tools, /save <file>, /help. When jsonOutput is set,
 // each answer is printed as a buffered JSON object instead of streamed text.
-// isTerminal controls whether /clear also wipes the visible screen (skipped
-// when stdout isn't a real terminal, to avoid emitting raw ANSI codes).
-func runChat(ctx context.Context, session *chatSession, jsonOutput bool, isTerminal bool) error {
+func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "> ",
 		HistoryFile:  historyFilePath(),
@@ -321,7 +324,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool, isTermi
 		}
 
 		if strings.HasPrefix(line, "/") {
-			history = handleSlashCommand(ctx, rl, line, history, session, isTerminal)
+			history = handleSlashCommand(ctx, rl, line, history, session)
 			continue
 		}
 
@@ -351,7 +354,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool, isTermi
 // handleSlashCommand processes a chat REPL command (a line starting with
 // "/") and returns the (possibly modified) history to continue the loop
 // with. Unknown commands are reported but otherwise harmless.
-func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string, history []ollama.Message, session *chatSession, isTerminal bool) []ollama.Message {
+func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string, history []ollama.Message, session *chatSession) []ollama.Message {
 	out := rl.Stdout()
 	fields := strings.Fields(line)
 	cmd := fields[0]
@@ -370,10 +373,12 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		return history
 
 	case "/clear":
-		if isTerminal {
+		if session.colorLevel != terminal.None {
 			// ANSI: clear screen (2J) and move cursor to top-left (H), so the
 			// reset is visible immediately rather than just resetting state
-			// the user can't see any effect of.
+			// the user can't see any effect of. Gated on colorLevel (not just
+			// "is this a terminal") so NO_COLOR also suppresses this, since
+			// it's still an ANSI escape sequence.
 			fmt.Fprint(out, "\x1b[2J\x1b[H")
 		}
 		fmt.Fprintln(out, "Conversation history cleared.")
@@ -493,6 +498,26 @@ func historyFilePath() string {
 	return dir + "/chat_history"
 }
 
+// expandTilde expands a leading "~" or "~/..." to the current user's home
+// directory. Shells normally do this themselves, but a quoted argument
+// (e.g. "~/some dir with spaces") suppresses tilde expansion, so a literal
+// "~" can reach the program unexpanded — handle it here rather than making
+// users get their quoting exactly right. "~user/..." (another user's home)
+// is intentionally not supported, to keep this simple.
+func expandTilde(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand ~ in path: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -500,20 +525,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-// isInteractive reports whether r is a real terminal (as opposed to a pipe
-// or redirected file). Used both to decide whether piped stdin should be
-// slurped as the prompt, and whether an io.Writer stream is safe to send
-// ANSI color codes to.
-func isInteractive(v any) bool {
-	f, ok := v.(*os.File)
-	if !ok {
-		return true
-	}
-	stat, err := f.Stat()
-	if err != nil {
-		return true
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
 }

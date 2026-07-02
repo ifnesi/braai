@@ -163,6 +163,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onChunk func(C
 	var final ChatResponse
 	var content, thinking strings.Builder
 	var toolCalls []ToolCall
+	doneSeen := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -192,10 +193,18 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onChunk func(C
 
 		if chunk.Done {
 			final = chunk
+			doneSeen = true
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read ollama stream: %w", err)
+	}
+	if !doneSeen {
+		// The connection closed (server crash, network drop, proxy timeout,
+		// etc.) before Ollama sent its final done:true chunk. Without this
+		// check we'd silently return a zero-value/partial message as if it
+		// were a successful, complete answer.
+		return nil, fmt.Errorf("ollama stream ended without a final response (connection closed early?)")
 	}
 
 	final.Message.Content = content.String()

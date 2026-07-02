@@ -69,19 +69,19 @@ func (r *Registry) readFileText(relPath string, startLine, endLine int) (string,
 		return "", fmt.Errorf("%q is a directory, not a file", relPath)
 	}
 
-	isText, err := looksLikeText(absPath)
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", fmt.Errorf("open %q: %w", relPath, err)
+	}
+	defer f.Close()
+
+	isText, err := looksLikeTextFile(f)
 	if err != nil {
 		return "", fmt.Errorf("read %q: %w", relPath, err)
 	}
 	if !isText {
 		return "", fmt.Errorf("%q appears to be a binary file; refusing to read", relPath)
 	}
-
-	f, err := os.Open(absPath)
-	if err != nil {
-		return "", fmt.Errorf("open %q: %w", relPath, err)
-	}
-	defer f.Close()
 
 	var b strings.Builder
 	scanner := bufio.NewScanner(f)

@@ -78,14 +78,17 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("embedding request failed: %w", err)
 	}
-	queryVec := queryVecs[0]
+	queryVec := normalize(queryVecs[0])
 
+	// Cached vectors are already normalized (see ensureEmbeddings), so
+	// similarity is just a dot product rather than a full cosine similarity
+	// recomputing both norms on every query.
 	matches := make([]semanticMatch, 0, len(candidates))
 	for _, c := range candidates {
 		entry := r.embedCache[c.absPath]
 		matches = append(matches, semanticMatch{
 			Path:    r.root.RelPath(c.absPath),
-			Score:   cosineSimilarity(queryVec, entry.vector),
+			Score:   dot(queryVec, entry.vector),
 			Excerpt: c.excerpt,
 		})
 	}
@@ -136,13 +139,10 @@ func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCan
 			return nil
 		}
 
-		isText, textErr := looksLikeText(path)
-		if textErr != nil || !isText {
-			return nil
-		}
-
+		// Read once and sniff the bytes already in hand, rather than opening
+		// the file a second time just to check whether it looks like text.
 		data, readErr := os.ReadFile(path)
-		if readErr != nil {
+		if readErr != nil || !looksLikeTextBytes(data) {
 			return nil
 		}
 		text := string(data)
@@ -150,10 +150,7 @@ func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCan
 			text = text[:r.limits.MaxEmbedChars]
 		}
 
-		excerpt := text
-		if len(excerpt) > 200 {
-			excerpt = excerpt[:200]
-		}
+		excerpt := truncateExcerpt(text, 200)
 
 		candidates = append(candidates, semanticCandidate{absPath: path, text: text, excerpt: excerpt})
 		if len(candidates) >= r.limits.MaxSemanticFiles {
@@ -168,11 +165,15 @@ func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCan
 	return candidates, truncated, nil
 }
 
+// maxEmbedBatch caps how many texts go into a single Embed HTTP request, so
+// a large uncached candidate set (up to MaxSemanticFiles) doesn't produce
+// one enormous request body that a server or proxy might reject or truncate.
+const maxEmbedBatch = 32
+
 // ensureEmbeddings computes and caches embeddings for any candidates whose
-// file has changed (or was never embedded) since the last call, batching all
-// of them into as few Embed calls as possible. Unchanged files reuse their
-// cached vector, so repeated searches within one braai run only pay the
-// embedding cost once per file.
+// file has changed (or was never embedded) since the last call, in batches
+// of maxEmbedBatch. Unchanged files reuse their cached vector, so repeated
+// searches within one braai run only pay the embedding cost once per file.
 func (r *Registry) ensureEmbeddings(ctx context.Context, candidates []semanticCandidate) error {
 	var toEmbed []semanticCandidate
 	var modTimes []int64
@@ -189,41 +190,62 @@ func (r *Registry) ensureEmbeddings(ctx context.Context, candidates []semanticCa
 		toEmbed = append(toEmbed, c)
 		modTimes = append(modTimes, mtime)
 	}
-	if len(toEmbed) == 0 {
-		return nil
-	}
 
-	texts := make([]string, len(toEmbed))
-	for i, c := range toEmbed {
-		texts[i] = c.text
-	}
+	for start := 0; start < len(toEmbed); start += maxEmbedBatch {
+		end := start + maxEmbedBatch
+		if end > len(toEmbed) {
+			end = len(toEmbed)
+		}
+		batch := toEmbed[start:end]
 
-	vectors, err := r.embedClient.Embed(ctx, r.embedModel, texts)
-	if err != nil {
-		return err
-	}
+		texts := make([]string, len(batch))
+		for i, c := range batch {
+			texts[i] = c.text
+		}
 
-	for i, c := range toEmbed {
-		r.embedCache[c.absPath] = embedCacheEntry{modTime: modTimes[i], vector: vectors[i]}
+		vectors, err := r.embedClient.Embed(ctx, r.embedModel, texts)
+		if err != nil {
+			return err
+		}
+
+		for i, c := range batch {
+			r.embedCache[c.absPath] = embedCacheEntry{modTime: modTimes[start+i], vector: normalize(vectors[i])}
+		}
 	}
 	return nil
 }
 
-// cosineSimilarity returns the cosine similarity of two equal-length
-// vectors, or 0 if they're empty/mismatched (rather than panicking on a
-// malformed embedding response).
-func cosineSimilarity(a, b []float32) float64 {
+// normalize returns v scaled to unit length, so that a cosine similarity
+// against another normalized vector reduces to a plain dot product — dot
+// is computed once per cached vector here, rather than recomputing both
+// vectors' norms on every single query.
+func normalize(v []float32) []float32 {
+	var sumSq float64
+	for _, x := range v {
+		sumSq += float64(x) * float64(x)
+	}
+	if sumSq == 0 {
+		return v
+	}
+	norm := float32(math.Sqrt(sumSq))
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = x / norm
+	}
+	return out
+}
+
+// dot returns the dot product of two equal-length vectors, or 0 if they're
+// empty/mismatched (rather than panicking on a malformed embedding
+// response). When both inputs are unit vectors (see normalize), this is
+// exactly their cosine similarity.
+func dot(a, b []float32) float64 {
 	if len(a) == 0 || len(a) != len(b) {
 		return 0
 	}
-	var dot, normA, normB float64
+	var sum float64
 	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		normA += float64(a[i]) * float64(a[i])
-		normB += float64(b[i]) * float64(b[i])
+		sum += float64(a[i]) * float64(b[i])
 	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+	return sum
 }

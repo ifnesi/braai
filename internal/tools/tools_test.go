@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"braai/internal/security"
 )
@@ -267,6 +268,26 @@ func TestSearchContent(t *testing.T) {
 	}
 	if !strings.Contains(out.Text, "sub/file.txt") {
 		t.Errorf("expected match in sub/file.txt, got: %s", out.Text)
+	}
+}
+
+func TestSearchContentExcerptDoesNotSplitMultiByteRune(t *testing.T) {
+	dir := t.TempDir()
+	// A line whose matched text starts right before byte offset 200, packed
+	// with multi-byte runes (é is 2 bytes in UTF-8) so a naive s[:200] byte
+	// truncation would very likely split one in half.
+	line := strings.Repeat("é", 250) + " target"
+	must(t, os.WriteFile(filepath.Join(dir, "unicode.txt"), []byte(line), 0o644))
+	root, err := security.NewRoot(dir)
+	must(t, err)
+	r := NewRegistry(root, DefaultLimits(), false, &fakeEmbedder{}, "fake-embed-model")
+
+	out, err := call(t, r, "search_content", map[string]any{"query": "target"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !utf8.ValidString(out.Text) {
+		t.Fatalf("result contains invalid UTF-8 (excerpt split a multi-byte rune): %q", out.Text)
 	}
 }
 

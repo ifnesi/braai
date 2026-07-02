@@ -71,26 +71,27 @@ cat question.txt | ./braai --model mistral --working-dir .
 # Omit prompt/stdin entirely to start an interactive chat
 ./braai --model llama3.1
 
-# Stream the model's reasoning/thinking trace before its answer
-./braai --model llama3.1 --show-reasoning "why does main.go split runOnce and runChat?"
+# Reasoning/thinking is streamed before the answer by default; opt out with --hide-reasoning
+./braai --model llama3.1 --hide-reasoning "why does main.go split runOnce and runChat?"
 
 # Get a single structured JSON object instead of streamed text, e.g. for scripting
 ./braai --model llama3.1 --output json "list the files in internal/tools" | jq .
 ```
 
 By default (`--output text`), answers are streamed to stdout as the model
-produces them, rather than printed only once the full response is ready.
-When `--show-reasoning` is used in a real terminal, the reasoning trace is
-dimmed so it's visually distinct from the final answer; the dimming is
-skipped automatically when stdout is piped or redirected, so redirected
-output stays free of ANSI escape codes.
+produces them, rather than printed only once the full response is ready. The
+model's reasoning/thinking trace (on models that support it) is streamed
+before the answer by default too — pass `--hide-reasoning` to suppress it.
+In a real terminal, the reasoning trace is dimmed so it's visually distinct
+from the final answer; the dimming is skipped automatically when stdout is
+piped or redirected, so redirected output stays free of ANSI escape codes.
 
 With `--output json`, streaming is disabled and braai instead prints one
 JSON object per answer once it's complete:
 `{"answer": "...", "reasoning": "...", "tool_calls": [{"name": "...", "arguments": {...}, "result": "..."}]}`.
-`reasoning` is only populated when `--show-reasoning` is also set, and
-`tool_calls` is omitted if the model answered without using any tools. This
-works in both one-shot and interactive chat mode (one JSON object per turn).
+`reasoning` is omitted when `--hide-reasoning` is set, and `tool_calls` is
+omitted if the model answered without using any tools. This works in both
+one-shot and interactive chat mode (one JSON object per turn).
 
 The interactive chat supports standard readline-style line editing: left/right
 arrows to move within the line, Ctrl-A/Ctrl-E to jump to the start/end of the
@@ -137,7 +138,7 @@ restarting with a different `--model` flag.
 | `--ollama-host` | `http://localhost:11434` | Ollama server base URL |
 | `--prompt` | — | Run one prompt non-interactively (trailing args work the same way) |
 | `--verbose` | `false` | Print tool calls and intermediate steps to stderr |
-| `--show-reasoning` | `false` | Stream the model's reasoning/thinking trace (on models that support it) before its answer |
+| `--hide-reasoning` | `false` | Don't stream the model's reasoning/thinking trace (shown by default, on models that support it) before its answer |
 | `--max-tool-calls` | `100` | Max tool calls allowed per request before aborting |
 | `--max-read-bytes` | `-1` (no limit) | Max bytes `read_file` will return |
 | `--version` | — | Print the braai version and exit |

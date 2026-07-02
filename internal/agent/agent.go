@@ -28,8 +28,11 @@ using the tools provided. Rules you must follow:
    files you need (e.g. summarizing a batch of meeting notes), prefer
    read_files over multiple individual read_file calls.
 4. Stay within the fixed toolset you are given: list_dir, read_file,
-   read_files, search_name, search_content, stat_file, and (only on
-   vision-capable models) read_image. There are no other capabilities.
+   read_files, search_name, search_content, search_semantic, stat_file, and
+   (only on vision-capable models) read_image. There are no other
+   capabilities. search_semantic finds files by meaning rather than exact
+   text but requires the server to support embeddings — if it errors, fall
+   back to search_content.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.
@@ -128,23 +131,38 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 	toolDefs := a.registry.Definitions()
 	var toolCalls []ToolCallRecord
 
-	var think *bool
-	if a.opts.ShowReasoning {
-		t := true
-		think = &t
-	}
+	// Ask Ollama explicitly either way (not just omit the field when hiding)
+	// so a model that defaults to always reasoning is actually told not to
+	// bother computing it when the user asked to hide it.
+	think := &a.opts.ShowReasoning
 
 	warnedContext := false
+	// Seed the running token estimate from the incoming history once, then
+	// add each newly appended message's cost incrementally below — avoids
+	// re-scanning the whole (potentially multi-turn, multi-megabyte) history
+	// on every one of up to MaxToolCalls iterations.
+	usedTokens := 0
+	for _, m := range history {
+		usedTokens += messageTokenCost(m)
+	}
 
 	for i := 0; i < a.opts.MaxToolCalls+1; i++ {
 		if a.opts.ContextLength > 0 && !warnedContext {
-			if used, ratio := estimateContextUsage(history, a.opts.ContextLength); ratio >= contextWarnThreshold {
+			if ratio := float64(usedTokens) / float64(a.opts.ContextLength); ratio >= contextWarnThreshold {
 				fmt.Fprintf(a.opts.VerboseWriter, "warning: conversation is ~%d%% of %s's estimated %d-token context window (~%d tokens); it may start dropping earlier context or produce degraded answers. Consider a shorter prompt, fewer read_files at once, or (in chat mode) /clear.\n",
-					int(ratio*100), a.opts.Model, a.opts.ContextLength, used)
+					int(ratio*100), a.opts.Model, a.opts.ContextLength, usedTokens)
 				warnedContext = true
 			}
 		}
 
+		// Restart the spinner for this round trip; it was stopped by the
+		// previous iteration's first streamed chunk (or never started, on
+		// the first iteration, in which case Start is a caller's job before
+		// calling Run). Spinner.Start is a no-op if already running, so this
+		// is safe even though the caller also starts it once up front.
+		if a.opts.Spinner != nil {
+			a.opts.Spinner.Start()
+		}
 		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.ColorLevel, a.opts.Spinner)
 
 		resp, err := a.client.ChatStream(ctx, ollama.ChatRequest{
@@ -159,14 +177,21 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		streamer.finish()
 
 		history = append(history, resp.Message)
+		usedTokens += messageTokenCost(resp.Message)
 
 		if len(resp.Message.ToolCalls) == 0 {
-			return RunResult{
+			result := RunResult{
 				Answer:    resp.Message.Content,
-				Reasoning: resp.Message.Thinking,
 				ToolCalls: toolCalls,
 				History:   history,
-			}, nil
+			}
+			if a.opts.ShowReasoning {
+				// Defense in depth: even though think:false is sent to
+				// Ollama above, don't surface Thinking in the result if the
+				// user asked to hide it, in case a model ignores that hint.
+				result.Reasoning = resp.Message.Thinking
+			}
+			return result, nil
 		}
 
 		if a.opts.Verbose {
@@ -190,12 +215,14 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 				record.Error = callErr.Error()
 			}
 			toolCalls = append(toolCalls, record)
-			history = append(history, ollama.Message{
+			toolMsg := ollama.Message{
 				Role:     "tool",
 				Content:  content,
 				ToolName: tc.Function.Name,
 				Images:   result.Images,
-			})
+			}
+			history = append(history, toolMsg)
+			usedTokens += messageTokenCost(toolMsg)
 		}
 	}
 
@@ -216,19 +243,26 @@ const charsPerToken = 4
 // context-window warning roughly honest when read_image has been used.
 const imageTokenEstimate = 768
 
+// messageTokenCost returns a rough token estimate for a single message, so
+// Run can track usedTokens incrementally (adding each new message's cost as
+// it's appended) instead of re-scanning the entire history on every one of
+// up to MaxToolCalls iterations. This is intentionally approximate
+// (character counting, not the model's real tokenizer) — good enough to
+// warn well before a conversation is likely to overflow the context window,
+// not to predict it exactly.
+func messageTokenCost(m ollama.Message) int {
+	chars := len(m.Content) + len(m.Thinking)
+	return chars/charsPerToken + len(m.Images)*imageTokenEstimate
+}
+
 // estimateContextUsage returns a rough token count for history and its ratio
-// to contextLength. This is intentionally approximate (character counting,
-// not the model's real tokenizer) — good enough to warn well before a
-// conversation is likely to overflow the context window, not to predict it
-// exactly.
+// to contextLength, by summing messageTokenCost over every message. Kept as
+// a convenience for computing a one-off total (e.g. seeding Run's running
+// counter, or in tests) — Run itself only calls this once per invocation.
 func estimateContextUsage(history []ollama.Message, contextLength int) (tokens int, ratio float64) {
-	chars := 0
-	images := 0
 	for _, m := range history {
-		chars += len(m.Content) + len(m.Thinking)
-		images += len(m.Images)
+		tokens += messageTokenCost(m)
 	}
-	tokens = chars/charsPerToken + images*imageTokenEstimate
 	ratio = float64(tokens) / float64(contextLength)
 	return tokens, ratio
 }

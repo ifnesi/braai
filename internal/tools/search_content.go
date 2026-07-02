@@ -74,16 +74,11 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 			return nil // skip large or unreadable files
 		}
 
-		isText, textErr := looksLikeText(path)
-		if textErr != nil || !isText {
+		found, isText, scanErr := scanFileForMatches(path, needle, caseSensitive, r.limits.MaxSearchResults-len(matches))
+		if scanErr != nil || !isText {
 			return nil
 		}
-
 		filesScanned++
-		found, scanErr := scanFileForMatches(path, needle, caseSensitive, r.limits.MaxSearchResults-len(matches))
-		if scanErr != nil {
-			return nil
-		}
 		for _, m := range found {
 			m.Path = r.root.RelPath(path)
 			matches = append(matches, m)
@@ -109,16 +104,24 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 	return textResult(string(out)), nil
 }
 
-// scanFileForMatches reads path line by line and returns up to maxResults matches.
-func scanFileForMatches(path, needle string, caseSensitive bool, maxResults int) ([]contentMatch, error) {
-	if maxResults <= 0 {
-		return nil, nil
-	}
+// scanFileForMatches opens path once — sniffing it for binary content and,
+// if it looks like text, scanning it line by line — returning up to
+// maxResults matches. isText is false (with a nil error) for binary files,
+// so the caller can skip them without treating that as a scan failure.
+func scanFileForMatches(path, needle string, caseSensitive bool, maxResults int) (matches []contentMatch, isText bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
+
+	isText, err = looksLikeTextFile(f)
+	if err != nil || !isText {
+		return nil, isText, err
+	}
+	if maxResults <= 0 {
+		return nil, true, nil
+	}
 
 	var results []contentMatch
 	scanner := bufio.NewScanner(f)
@@ -133,18 +136,22 @@ func scanFileForMatches(path, needle string, caseSensitive bool, maxResults int)
 			haystack = strings.ToLower(line)
 		}
 		if strings.Contains(haystack, needle) {
-			results = append(results, contentMatch{Line: lineNum, Excerpt: strings.TrimSpace(truncateExcerpt(line, 200))})
+			results = append(results, contentMatch{Line: lineNum, Excerpt: truncateExcerpt(line, 200)})
 			if len(results) >= maxResults {
 				break
 			}
 		}
 	}
-	return results, scanner.Err()
+	return results, true, scanner.Err()
 }
 
+// truncateExcerpt truncates s to at most max runes (not bytes), so it never
+// splits a multi-byte UTF-8 rune and produce an invalid string.
 func truncateExcerpt(s string, max int) string {
-	if len(s) <= max {
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
 }

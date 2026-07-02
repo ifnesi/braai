@@ -35,7 +35,7 @@ func Detect(w io.Writer) Level {
 	}
 
 	// Only emit codes when writing to an actual terminal.
-	if !isCharDevice(w) {
+	if !IsTerminal(w) {
 		return None
 	}
 
@@ -51,12 +51,16 @@ func Detect(w io.Writer) Level {
 	return Basic
 }
 
-// isCharDevice reports whether w is backed by a real terminal character device.
-func isCharDevice(w io.Writer) bool {
-	f, ok := w.(*os.File)
+// IsTerminal reports whether v (expected to be an *os.File, but accepted as
+// any so it can check both io.Reader stdin and io.Writer stdout without two
+// near-identical functions) is backed by a real terminal character device.
+// Non-*os.File values (pipes represented as bytes.Buffer in tests, wrapped
+// writers, etc.) are treated as non-terminals — the safe default, since
+// callers use this to decide whether it's safe to emit ANSI codes or slurp
+// piped input.
+func IsTerminal(v any) bool {
+	f, ok := v.(*os.File)
 	if !ok {
-		// Non-file writers (e.g. bytes.Buffer) — assume they can handle ANSI.
-		// In practice braai only passes os.Stdout here.
 		return false
 	}
 	stat, err := f.Stat()

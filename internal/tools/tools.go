@@ -9,6 +9,7 @@ import (
 
 	"braai/internal/ollama"
 	"braai/internal/security"
+	"braai/internal/textextract"
 )
 
 // Directories that are skipped by recursive/search operations because they
@@ -95,6 +96,10 @@ type Registry struct {
 	// long as the file's mtime hasn't changed — an all-in-memory,
 	// brute-force cache (no persistence, no vector DB).
 	embedCache map[string]embedCacheEntry
+
+	// documentChunkCache caches extracted/chunked documents by relative path.
+	// Set by read_document and search_document, read by get_chunk.
+	documentChunkCache map[string][]textextract.Chunk
 }
 
 type embedCacheEntry struct {
@@ -111,12 +116,13 @@ type embedCacheEntry struct {
 // error instead of panicking.
 func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient embedder, embedModel string) *Registry {
 	return &Registry{
-		root:          root,
-		limits:        limits,
-		visionCapable: visionCapable,
-		embedClient:   embedClient,
-		embedModel:    embedModel,
-		embedCache:    make(map[string]embedCacheEntry),
+		root:                   root,
+		limits:                 limits,
+		visionCapable:          visionCapable,
+		embedClient:            embedClient,
+		embedModel:             embedModel,
+		embedCache:             make(map[string]embedCacheEntry),
+		documentChunkCache:     make(map[string][]textextract.Chunk),
 	}
 }
 
@@ -127,10 +133,14 @@ func (r *Registry) Definitions() []ollama.Tool {
 		listDirDefinition(),
 		readFileDefinition(),
 		readFilesDefinition(),
+		readDocumentDefinition(),
 		searchNameDefinition(),
 		searchContentDefinition(),
+		searchDocumentDefinition(),
 		searchSemanticDefinition(),
 		statFileDefinition(),
+		getChunkDefinition(),
+		findAllFilesDefinition(),
 	}
 	if r.visionCapable {
 		defs = append(defs, readImageDefinition())
@@ -139,8 +149,8 @@ func (r *Registry) Definitions() []ollama.Tool {
 }
 
 // Call dispatches a tool call by name with the given decoded arguments,
-// returning the result to feed back to the model. Only search_semantic uses
-// ctx (for its embedding HTTP call); other tools ignore it since they're
+// returning the result to feed back to the model. search_document and search_semantic
+// use ctx (for embedding HTTP calls); other tools ignore it since they're
 // local filesystem operations.
 func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (Result, error) {
 	switch name {
@@ -150,16 +160,24 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return r.readFile(args)
 	case "read_files":
 		return r.readFiles(args)
+	case "read_document":
+		return r.readDocument(args)
 	case "read_image":
 		return r.readImage(args)
 	case "search_name":
 		return r.searchName(args)
 	case "search_content":
 		return r.searchContent(args)
+	case "search_document":
+		return r.searchDocument(ctx, args)
 	case "search_semantic":
 		return r.searchSemantic(ctx, args)
 	case "stat_file":
 		return r.statFile(args)
+	case "get_chunk":
+		return r.getChunk(args)
+	case "find_all_files":
+		return r.findAllFiles(args)
 	default:
 		return Result{}, unknownToolError(name)
 	}

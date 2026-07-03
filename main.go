@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/chzyer/readline"
 
@@ -24,7 +27,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.3"
+const version = "0.0.4"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -129,11 +132,10 @@ Flags:
 		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, !*hideReasoning, agentStdout, colorLevel, stderr)
+	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr)
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "using model: %s\n", session.model)
 
 	trailing := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	initialPrompt := firstNonEmpty(*prompt, trailing)
@@ -169,6 +171,7 @@ type chatSession struct {
 	stdout        io.Writer
 	colorLevel    terminal.Level
 	verboseWriter io.Writer
+	workingDir    string
 
 	model     string
 	modelInfo ollama.ModelInfo
@@ -176,7 +179,7 @@ type chatSession struct {
 	registry  *tools.Registry
 }
 
-func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, maxToolCalls int, verbose, showReasoning bool, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
+func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
 	return &chatSession{
 		client:        client,
 		root:          root,
@@ -185,6 +188,7 @@ func newChatSession(client *ollama.Client, root *security.Root, limits tools.Lim
 		maxToolCalls:  maxToolCalls,
 		verbose:       verbose,
 		showReasoning: showReasoning,
+		workingDir:    workingDir,
 		stdout:        stdout,
 		colorLevel:    colorLevel,
 		verboseWriter: verboseWriter,
@@ -299,7 +303,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	}
 	defer rl.Close()
 
-	fmt.Fprintf(rl.Stdout(), "braai %s interactive chat using model %s. Type your question, 'exit'/'quit' or Ctrl-D to leave, or /help for commands.\n", version, session.model)
+	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\nType your question, 'exit'/'quit' or Ctrl-D to leave, or /help for commands.\n", version, session.workingDir, session.model)
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
@@ -336,9 +340,26 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		sp := terminal.NewSpinner(rl.Stdout(), session.colorLevel)
 		session.ag.SetSpinner(sp)
 		sp.Start()
-		result, err := session.ag.Run(ctx, history)
+
+		// Create a cancellable context for this agent run so Ctrl-C can interrupt it
+		runCtx, cancel := context.WithCancel(ctx)
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT)
+		go func() {
+			<-sigChan
+			cancel()
+		}()
+
+		result, err := session.ag.Run(runCtx, history)
+		signal.Stop(sigChan)
+		cancel()
+
 		if err != nil {
 			sp.Stop() // erase spinner before printing error
+			if errors.Is(err, context.Canceled) {
+				fmt.Fprintf(rl.Stdout(), "\n")
+				continue
+			}
 			fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error: "+err.Error()))
 			continue
 		}
@@ -368,6 +389,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintln(out, "  /model             show the current model and list models available on the server")
 		fmt.Fprintln(out, "  /model <name>      switch to a different model and save it as the default")
 		fmt.Fprintln(out, "  /save <file>       save the conversation transcript to a file")
+		fmt.Fprintln(out, "  /copy              copy the last answer to clipboard")
 		fmt.Fprintln(out, "  /help              show this message")
 		fmt.Fprintln(out, "  exit, quit         leave the chat (Ctrl-D also works)")
 		return history
@@ -461,6 +483,19 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		}
 		return history
 
+	case "/copy":
+		transcript, err := formatTranscript(history)
+		if err != nil {
+			fmt.Fprintf(out, "could not format transcript: %v\n", err)
+			return history
+		}
+		if err := copyToClipboard(transcript); err != nil {
+			fmt.Fprintf(out, "could not copy to clipboard: %v\n", err)
+		} else {
+			fmt.Fprintln(out, "conversation copied to clipboard")
+		}
+		return history
+
 	default:
 		fmt.Fprintf(out, "unknown command %q; try /help\n", cmd)
 		return history
@@ -472,7 +507,8 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 // The path is resolved relative to the process's current directory, exactly
 // like shell output redirection would — this is a user-initiated save of
 // their own conversation, not something the model can trigger.
-func saveTranscript(path string, history []ollama.Message) error {
+// formatTranscript formats the conversation history as a readable string.
+func formatTranscript(history []ollama.Message) (string, error) {
 	var b strings.Builder
 	for _, m := range history {
 		switch m.Role {
@@ -485,7 +521,15 @@ func saveTranscript(path string, history []ollama.Message) error {
 			fmt.Fprintf(&b, "## braai\n\n%s\n\n", m.Content)
 		}
 	}
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return b.String(), nil
+}
+
+func saveTranscript(path string, history []ollama.Message) error {
+	transcript, err := formatTranscript(history)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(transcript), 0o644)
 }
 
 // historyFilePath returns a per-user location for chat history persisted
@@ -525,4 +569,32 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// copyToClipboard copies text to the system clipboard using pbcopy (macOS) or xclip (Linux).
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+
+	// Try pbcopy first (macOS)
+	if _, err := exec.LookPath("pbcopy"); err == nil {
+		cmd = exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+
+	// Try xclip (Linux)
+	if _, err := exec.LookPath("xclip"); err == nil {
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+
+	// Try xsel (Linux alternative)
+	if _, err := exec.LookPath("xsel"); err == nil {
+		cmd = exec.Command("xsel", "--clipboard", "--input")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+
+	return fmt.Errorf("no clipboard utility found (tried pbcopy, xclip, xsel)")
 }

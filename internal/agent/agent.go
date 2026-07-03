@@ -28,11 +28,15 @@ using the tools provided. Rules you must follow:
    files you need (e.g. summarizing a batch of meeting notes), prefer
    read_files over multiple individual read_file calls.
 4. Stay within the fixed toolset you are given: list_dir, read_file,
-   read_files, search_name, search_content, search_semantic, stat_file, and
-   (only on vision-capable models) read_image. There are no other
-   capabilities. search_semantic finds files by meaning rather than exact
-   text but requires the server to support embeddings — if it errors, fall
-   back to search_content.
+   read_files, read_document, search_name, search_content, search_document,
+   search_semantic, stat_file, get_chunk, find_all_files, and (only on
+   vision-capable models) read_image. For discovering files in unknown
+   directories, use find_all_files(path) to see the full file tree. For
+   documents (PDF, Word, Excel, PowerPoint, etc.), use read_document() to
+   extract text intelligently, then search_document() to find relevant chunks
+   by meaning, and get_chunk() to retrieve full text of specific chunks.
+   search_semantic finds files by meaning rather than exact text but requires
+   embeddings support — if it errors, fall back to search_content.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.

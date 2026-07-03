@@ -1,6 +1,9 @@
 package tools
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 func unknownToolError(name string) error {
 	return fmt.Errorf("unknown tool: %s", name)
@@ -30,6 +33,19 @@ func optionalStringArg(args map[string]any, key, def string) string {
 		return def
 	}
 	return s
+}
+
+// intArg extracts a required integer argument (JSON numbers decode as float64).
+func intArg(args map[string]any, key string) (int, error) {
+	v, ok := args[key]
+	if !ok {
+		return 0, fmt.Errorf("missing required argument %q", key)
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return 0, fmt.Errorf("argument %q must be an integer", key)
+	}
+	return int(f), nil
 }
 
 // optionalIntArg extracts an optional integer argument (JSON numbers decode as float64).
@@ -77,4 +93,14 @@ func stringSliceArg(args map[string]any, key string) []string {
 		}
 	}
 	return out
+}
+
+// marshalCompactJSON marshals a value to JSON without unnecessary whitespace.
+// Used for token-efficient LLM responses. Returns a string and error.
+func marshalCompactJSON(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

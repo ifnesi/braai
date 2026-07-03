@@ -97,7 +97,7 @@ one-shot and interactive chat mode (one JSON object per turn).
 The interactive chat uses a `>>>` prompt and supports standard readline-style
 line editing: left/right arrows to move within the line, Ctrl-A/Ctrl-E to
 jump to the start/end, Ctrl-C to clear the current input (shows a hint to exit
-via Ctrl-D or `/bye`), and up/down arrows to recall history from previous
+via Ctrl + d or `/bye`), and up/down arrows to recall history from previous
 sessions (persisted to `~/.braai/chat_history`, capped at the last 100
 entries — the file is trimmed to that limit every time braai starts).
 
@@ -112,7 +112,7 @@ A few slash-commands are available inside the chat:
 | `/help` | List available commands |
 | `/clear` | Reset the conversation history and clear the visible screen (start fresh without restarting) |
 | `/copy` | Copy the last answer to clipboard |
-| `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl-D also works) |
+| `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl + d, also works) |
 | `/forget-history` | Erase `~/.braai/chat_history` — the up/down arrow recall history — separate from the conversation itself |
 | `/tools` | List the tools currently available to the model |
 | `/model` | Show the current model and list every model available on the Ollama server |

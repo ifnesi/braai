@@ -309,7 +309,7 @@ const maxHistoryEntries = 100
 
 // runChat drives an interactive prompt with readline-style line editing:
 // left/right arrows, Ctrl-A/Ctrl-E to jump to the start/end of the line, and
-// Ctrl-C to clear the current input instead of killing the process (Ctrl-D
+// Ctrl-C to clear the current input instead of killing the process (Ctrl + d
 // or 'exit'/'quit' still leave the chat). A few slash-commands are also
 // available: /clear, /tools, /save <file>, /help. When jsonOutput is set,
 // each answer is printed as a buffered JSON object instead of streamed text.
@@ -414,15 +414,15 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 	switch cmd {
 	case "/help":
 		fmt.Fprintln(out, "Commands:")
-		fmt.Fprintln(out, "  /clear             reset the conversation history")
-		fmt.Fprintln(out, "  /forget-history    erase ~/.braai/chat_history (the up/down recall history)")
-		fmt.Fprintln(out, "  /tools             list the tools available to the model")
-		fmt.Fprintln(out, "  /model             show the current model and list models available on the server")
-		fmt.Fprintln(out, "  /model <name>      switch to a different model and save it as the default")
-		fmt.Fprintln(out, "  /save <file>       save the conversation transcript to a file")
-		fmt.Fprintln(out, "  /copy              copy the last answer to clipboard")
-		fmt.Fprintln(out, "  /help              show this message")
-		fmt.Fprintln(out, "  exit, quit, /bye   leave the chat (Ctrl-D also works)")
+		fmt.Fprintf(out, "  %s%s reset the conversation history\n", terminal.Bold(session.colorLevel, "/clear"), strings.Repeat(" ", 18-len("/clear")))
+		fmt.Fprintf(out, "  %s%s erase ~/.braai/chat_history (the up/down recall history)\n", terminal.Bold(session.colorLevel, "/forget-history"), strings.Repeat(" ", 18-len("/forget-history")))
+		fmt.Fprintf(out, "  %s%s list the tools available to the model\n", terminal.Bold(session.colorLevel, "/tools"), strings.Repeat(" ", 18-len("/tools")))
+		fmt.Fprintf(out, "  %s%s show the current model and list models available on the server\n", terminal.Bold(session.colorLevel, "/model"), strings.Repeat(" ", 18-len("/model")))
+		fmt.Fprintf(out, "  %s%s switch to a different model and save it as the default\n", terminal.Bold(session.colorLevel, "/model <name>"), strings.Repeat(" ", 18-len("/model <name>")))
+		fmt.Fprintf(out, "  %s%s save the conversation transcript to a file\n", terminal.Bold(session.colorLevel, "/save <file>"), strings.Repeat(" ", 18-len("/save <file>")))
+		fmt.Fprintf(out, "  %s%s copy the last answer to clipboard\n", terminal.Bold(session.colorLevel, "/copy"), strings.Repeat(" ", 18-len("/copy")))
+		fmt.Fprintf(out, "  %s%s show this message\n", terminal.Bold(session.colorLevel, "/help"), strings.Repeat(" ", 18-len("/help")))
+		fmt.Fprintf(out, "  %s%s leave the chat (Ctrl + d, also works)\n", terminal.Bold(session.colorLevel, "/bye, exit, quit"), strings.Repeat(" ", 18-len("/bye, exit, quit")))
 		return history
 
 	case "/clear":

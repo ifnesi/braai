@@ -100,6 +100,11 @@ type Registry struct {
 	// documentChunkCache caches extracted/chunked documents by relative path.
 	// Set by read_document and search_document, read by get_chunk.
 	documentChunkCache map[string][]textextract.Chunk
+
+	// chunkEmbedder embeds and semantically ranks document chunks for
+	// search_document. It is long-lived so its per-document embedding cache
+	// is reused across calls. Nil when no embedding client is configured.
+	chunkEmbedder *textextract.ChunkEmbedder
 }
 
 type embedCacheEntry struct {
@@ -115,7 +120,7 @@ type embedCacheEntry struct {
 // Ollama client available, in which case search_semantic reports a clear
 // error instead of panicking.
 func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient embedder, embedModel string) *Registry {
-	return &Registry{
+	r := &Registry{
 		root:                   root,
 		limits:                 limits,
 		visionCapable:          visionCapable,
@@ -124,6 +129,10 @@ func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedCl
 		embedCache:             make(map[string]embedCacheEntry),
 		documentChunkCache:     make(map[string][]textextract.Chunk),
 	}
+	if embedClient != nil {
+		r.chunkEmbedder = textextract.NewChunkEmbedder(embedClient.Embed)
+	}
+	return r
 }
 
 // Definitions returns the Ollama tool schemas for all supported tools, in a

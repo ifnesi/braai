@@ -3,9 +3,10 @@
 `braai` is a small, read-only AI agent CLI that answers questions about a local
 working directory. It uses a local [Ollama](https://ollama.com) server for
 reasoning and lets the model call a fixed set of read-only filesystem tools
-(list, read, batch-read, search by name, search by content, stat, and —
-on vision-capable models — read/OCR images) to gather evidence before
-answering. It never writes, deletes, or executes anything on your filesystem.
+(list, read, batch-read, search by name/content, read/extract/search documents,
+stat, and — on vision-capable models — read/OCR images) to gather evidence
+before answering. It never writes, deletes, or executes anything on your
+filesystem.
 
 It works well as a local research assistant over a folder of meeting notes and
 audio transcripts, e.g. `braai --working-dir ~/notes/2026-Q3 "summarize this
@@ -93,12 +94,16 @@ JSON object per answer once it's complete:
 omitted if the model answered without using any tools. This works in both
 one-shot and interactive chat mode (one JSON object per turn).
 
-The interactive chat supports standard readline-style line editing: left/right
-arrows to move within the line, Ctrl-A/Ctrl-E to jump to the start/end of the
-line, Ctrl-C to clear the current input (without exiting), Ctrl-D or
-`exit`/`quit` to leave, and up/down arrows to recall history from previous
+The interactive chat uses a `>>>` prompt and supports standard readline-style
+line editing: left/right arrows to move within the line, Ctrl-A/Ctrl-E to
+jump to the start/end, Ctrl-C to clear the current input (shows a hint to exit
+via Ctrl-D or `/bye`), and up/down arrows to recall history from previous
 sessions (persisted to `~/.braai/chat_history`, capped at the last 100
 entries — the file is trimmed to that limit every time braai starts).
+
+When the model produces reasoning/thinking (on models that support it), it's
+shown with bold **Thinking...** and **...done thinking.** markers so it's
+visually distinct from the final answer; pass `--hide-reasoning` to suppress it.
 
 A few slash-commands are available inside the chat:
 
@@ -106,6 +111,8 @@ A few slash-commands are available inside the chat:
 |---|---|
 | `/help` | List available commands |
 | `/clear` | Reset the conversation history and clear the visible screen (start fresh without restarting) |
+| `/copy` | Copy the last answer to clipboard |
+| `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl-D also works) |
 | `/forget-history` | Erase `~/.braai/chat_history` — the up/down arrow recall history — separate from the conversation itself |
 | `/tools` | List the tools currently available to the model |
 | `/model` | Show the current model and list every model available on the Ollama server |
@@ -146,9 +153,25 @@ restarting with a different `--model` flag.
 
 ### Configuration file
 
-`braai` persists your last-used Ollama host and model to
-`~/.braai/settings.json` so subsequent runs can reuse them as defaults.
-Command-line flags always take precedence over this file.
+`braai` persists your last-used Ollama host, model, embedding model, and
+max tool calls to `~/.braai/settings.json` so subsequent runs can reuse them
+as defaults. Command-line flags always take precedence over this file.
+
+Example `~/.braai/settings.json`:
+
+```json
+{
+  "ollama_host": "http://localhost:11434",
+  "model": "gemma4:12b-mlx",
+  "embed_model": "nomic-embed-text",
+  "max_tool_calls": 100
+}
+```
+
+- `ollama_host` — URL of your Ollama server (default: `http://localhost:11434`)
+- `model` — Default chat model to use (auto-detected from first available if omitted)
+- `embed_model` — Model used for semantic search/document analysis (default: `nomic-embed-text`)
+- `max_tool_calls` — Max tool invocations per response before aborting (default: `100`)
 
 ## Read-only toolset
 
@@ -181,6 +204,24 @@ The agent can only call the tools below, all confined to `--working-dir`:
   tool returns a clear error and the model is expected to fall back to
   `search_content`. Slower and coarser-grained (whole-file, not per-chunk)
   than `search_content`, so prefer `search_content` for known substrings.
+- **read_document** — extract and optionally chunk text from documents (PDF,
+  Word, Excel, PowerPoint, HTML, CSV, JSON, RTF, plaintext, etc.). If text
+  is small (≤ 2000 tokens), returns it directly; if larger, returns a
+  manifest of chunks that can be fetched individually with `get_chunk`.
+  Supports `clean=true` to remove headers/footers/page numbers (default), or
+  `clean=false` for raw text.
+- **search_document** — semantically search within a single document to find
+  relevant chunks (e.g., "find the authentication requirements chapter").
+  Returns the top matching chunks ranked by semantic similarity, using the
+  same Ollama embeddings as `search_semantic` but at the sub-document level.
+  Useful for large documents like manuals or specs.
+- **get_chunk** — fetch the full text of a specific chunk after reading or
+  searching a document. Call `read_document` or `search_document` first to
+  get a manifest or results, then use this to retrieve the full text of a
+  chunk by its 1-indexed number.
+- **find_all_files** — recursively list all files under a directory. Returns
+  a compact JSON list of file paths. Useful for exploring large directory
+  structures and discovering files without iterating with `list_dir`.
 - **stat_file** — metadata: type, size, modification time, permissions,
   extension.
 - **read_image** — read a PNG/JPG/JPEG/GIF/WEBP and attach it to the

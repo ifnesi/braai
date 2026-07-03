@@ -49,8 +49,15 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 	if p.showReason && chunk.Message.Thinking != "" {
 		p.stopSpinner()
 		if !p.inThinking {
-			label := "--- reasoning ---"
-			fmt.Fprintln(p.out, terminal.Cyan(p.colorLevel, label))
+			// Print empty line before thinking, then "Thinking..." in bold+dim
+			fmt.Fprintln(p.out)
+			if p.colorLevel == terminal.None {
+				fmt.Fprintln(p.out, "Thinking...")
+			} else {
+				fmt.Fprint(p.out, "\x1b[1;2m") // bold + dim
+				fmt.Fprintln(p.out, "Thinking...")
+				fmt.Fprint(p.out, "\x1b[0m") // reset
+			}
 			// Open a dim region that will span all reasoning chunks.
 			fmt.Fprint(p.out, terminal.DimOpen(p.colorLevel))
 			p.inThinking = true
@@ -64,8 +71,22 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 		if p.inThinking {
 			// Close the dim region opened for reasoning.
 			fmt.Fprint(p.out, terminal.Reset(p.colorLevel))
-			fmt.Fprintln(p.out, "\n"+terminal.Cyan(p.colorLevel, "--- answer ---"))
+			// Print "...done thinking." in bold+dim
+			fmt.Fprintln(p.out)
+			if p.colorLevel == terminal.None {
+				fmt.Fprintln(p.out, "...done thinking.")
+			} else {
+				fmt.Fprint(p.out, "\x1b[1;2m") // bold + dim
+				fmt.Fprintln(p.out, "...done thinking.")
+				fmt.Fprint(p.out, "\x1b[0m") // reset
+			}
+			fmt.Fprintln(p.out)
 			p.inThinking = false
+		}
+
+		// Print empty line before content starts
+		if !p.printedAny {
+			fmt.Fprintln(p.out)
 		}
 
 		content := p.applyContentStyle(chunk.Message.Content)

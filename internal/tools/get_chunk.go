@@ -49,7 +49,6 @@ func (r *Registry) getChunk(args map[string]any) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-
 	if chunkIndex < 1 {
 		return Result{}, fmt.Errorf("chunk_index must be >= 1")
 	}
@@ -59,47 +58,24 @@ func (r *Registry) getChunk(args map[string]any) (Result, error) {
 		return Result{}, err
 	}
 
-	// Try the cache first (set by read_document or search_document).
-	if cachedChunks, ok := r.documentChunkCache[relPath]; ok {
-		for _, chunk := range cachedChunks {
-			if chunk.Index == chunkIndex {
-				out := getChunkResult{
-					Chunk: chunk,
-					Text:  chunk.Text,
-				}
-				jsonOut, _ := json.MarshalIndent(out, "", "  ")
-				return textResult(string(jsonOut)), nil
-			}
+	chunks, ok := r.documentChunkCache[relPath]
+	if !ok {
+		chunks, err = r.extractChunks(absPath)
+		if err != nil {
+			return Result{}, err
 		}
+		if len(chunks) == 0 {
+			return Result{}, fmt.Errorf("no extractable text")
+		}
+		r.documentChunkCache[relPath] = chunks
 	}
 
-	// Not in cache; re-extract and re-chunk.
-	text, err := textextract.ExtractText(absPath)
-	if err != nil {
-		return Result{}, fmt.Errorf("extract text: %w", err)
-	}
-
-	text = textextract.CleanForLLM(text)
-	text = textextract.NormalizeWhitespace(text)
-
-	if text == "" {
-		return Result{}, fmt.Errorf("no extractable text")
-	}
-
-	// Re-chunk the document to find the requested chunk.
-	chunks := textextract.ChunkText(text, 2000, relPath)
 	for _, chunk := range chunks {
 		if chunk.Index == chunkIndex {
-			// Update cache for future calls.
-			r.documentChunkCache[relPath] = chunks
-			out := getChunkResult{
-				Chunk: chunk,
-				Text:  chunk.Text,
-			}
+			out := getChunkResult{Chunk: chunk, Text: chunk.Text}
 			jsonOut, _ := json.MarshalIndent(out, "", "  ")
 			return textResult(string(jsonOut)), nil
 		}
 	}
-
 	return Result{}, fmt.Errorf("chunk %d not found (document has %d chunks)", chunkIndex, len(chunks))
 }

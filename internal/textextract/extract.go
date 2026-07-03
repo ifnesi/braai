@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -562,10 +563,11 @@ func stripRTF(text string) string {
 				break
 			}
 			if text[i] == '\'' && i+2 < len(text) {
-				// Hex escape
+				// Hex escape: RTF \'xx is an unsigned code-page byte (0x00-0xFF),
+				// not a signed value — parse as uint8 and write the raw byte.
 				hex := text[i+1 : i+3]
-				if v, err := strconv.ParseInt(hex, 16, 8); err == nil && !ignorable {
-					out.WriteRune(rune(v))
+				if v, err := strconv.ParseUint(hex, 16, 8); err == nil && !ignorable {
+					out.WriteByte(byte(v))
 				}
 				i += 3
 			} else if text[i] >= 'a' && text[i] <= 'z' {
@@ -722,29 +724,9 @@ func (l *limitedReadCloser) Close() error { return l.c.Close() }
 
 // sortByNaturalName sorts zip files so slide2.xml precedes slide10.xml.
 func sortByNaturalName(files []*zip.File) {
-	// Quicksort by natural order (numeric sequences treated as numbers)
-	quickSort(files, 0, len(files)-1)
-}
-
-func quickSort(files []*zip.File, lo, hi int) {
-	if lo < hi {
-		p := partition(files, lo, hi)
-		quickSort(files, lo, p-1)
-		quickSort(files, p+1, hi)
-	}
-}
-
-func partition(files []*zip.File, lo, hi int) int {
-	pivot := files[hi].Name
-	i := lo - 1
-	for j := lo; j < hi; j++ {
-		if naturalLess(files[j].Name, pivot) {
-			i++
-			files[i], files[j] = files[j], files[i]
-		}
-	}
-	files[i+1], files[hi] = files[hi], files[i+1]
-	return i + 1
+	sort.Slice(files, func(i, j int) bool {
+		return naturalLess(files[i].Name, files[j].Name)
+	})
 }
 
 func naturalLess(a, b string) bool {

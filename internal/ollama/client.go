@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -86,46 +87,6 @@ type ChatResponse struct {
 	Done       bool    `json:"done"`
 	DoneReason string  `json:"done_reason,omitempty"`
 	Error      string  `json:"error,omitempty"`
-}
-
-// Chat sends a non-streaming chat completion request.
-func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	req.Stream = false
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("encode chat request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build chat request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("calling ollama at %s: %w (is `ollama serve` running?)", c.baseURL, err)
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read ollama response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(data))
-	}
-
-	var chatResp ChatResponse
-	if err := json.Unmarshal(data, &chatResp); err != nil {
-		return nil, fmt.Errorf("decode ollama response: %w", err)
-	}
-	if chatResp.Error != "" {
-		return nil, fmt.Errorf("ollama error: %s", chatResp.Error)
-	}
-	return &chatResp, nil
 }
 
 // ChatStream sends a streaming chat completion request. onChunk is invoked
@@ -388,5 +349,29 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) ([][]
 	if len(embed.Embeddings) != len(inputs) {
 		return nil, fmt.Errorf("ollama returned %d embeddings for %d inputs", len(embed.Embeddings), len(inputs))
 	}
+	// Normalize every vector to unit length so downstream cosine similarity
+	// reduces to a plain dot product (see textextract.dotProduct and
+	// tools.searchSemantic). This is the single source of truth for
+	// normalization; callers must not assume raw vectors.
+	for i := range embed.Embeddings {
+		embed.Embeddings[i] = normalizeVector(embed.Embeddings[i])
+	}
 	return embed.Embeddings, nil
+}
+
+// normalizeVector scales v to unit length. A zero vector is returned unchanged.
+func normalizeVector(v []float32) []float32 {
+	var sumSq float64
+	for _, x := range v {
+		sumSq += float64(x) * float64(x)
+	}
+	if sumSq == 0 {
+		return v
+	}
+	norm := float32(math.Sqrt(sumSq))
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = x / norm
+	}
+	return out
 }

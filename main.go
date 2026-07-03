@@ -27,7 +27,11 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.4"
+const version = "0.0.5"
+
+// defaultEmbedModel is used for search_semantic / search_document when neither
+// --embed-model nor settings.embed_model is set.
+const defaultEmbedModel = "nomic-embed-text"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -43,11 +47,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var (
 		ollamaHost    = fs.String("ollama-host", "", "Ollama server base URL (default http://localhost:11434, or ~/.braai/settings.json)")
 		model         = fs.String("model", "", "Ollama model name to use (default: first model available on the server)")
+		embedModel    = fs.String("embed-model", "", "Ollama model to use for embeddings (search_semantic/search_document). Default: nomic-embed-text, or ~/.braai/settings.json")
 		workingDir    = fs.String("working-dir", "", "Root directory the agent may inspect (default: current directory)")
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
 		verbose       = fs.Bool("verbose", false, "Print tool calls and intermediate steps")
 		hideReasoning = fs.Bool("hide-reasoning", false, "Don't stream the model's reasoning/thinking trace before its answer (shown by default, on models that support it)")
-		maxToolCalls  = fs.Int("max-tool-calls", agent.DefaultMaxToolCalls, "Maximum number of tool calls per request")
+		maxToolCalls  = fs.Int("max-tool-calls", 0, "Maximum number of tool calls per request (default 100, or ~/.braai/settings.json)")
 		maxReadBytes  = fs.Int("max-read-bytes", -1, "Maximum bytes read_file returns (-1 = no limit)")
 		showVersion   = fs.Bool("version", false, "Print the braai version and exit")
 		outputFormat  = fs.String("output", "text", `Output format: "text" (default, streamed to stdout as produced) or "json" (buffered; a single JSON object per answer with the answer, reasoning, and tool calls used)`)
@@ -114,11 +119,25 @@ Flags:
 		return err
 	}
 
-	// Record the last-used host and tool-call limit as defaults for next
+	// Record the last-used host and effective tool-call limit as defaults for next
 	// time; the model itself is persisted by chatSession.switchModel below
 	// (also used at runtime by /model), so it isn't set here.
+	// Precedence: explicit flag (>0) wins, then persisted settings, then the
+	// built-in default. Persist the effective value without clobbering a
+	// user-edited settings.json with the flag's zero default.
+	resolvedMaxToolCalls := *maxToolCalls
+	if resolvedMaxToolCalls <= 0 {
+		resolvedMaxToolCalls = settings.MaxToolCalls
+	}
+	if resolvedMaxToolCalls <= 0 {
+		resolvedMaxToolCalls = agent.DefaultMaxToolCalls
+	}
+
 	settings.OllamaHost = host
-	settings.MaxToolCalls = *maxToolCalls
+	settings.MaxToolCalls = resolvedMaxToolCalls
+
+	resolvedEmbedModel := firstNonEmpty(*embedModel, settings.EmbedModel, defaultEmbedModel)
+	settings.EmbedModel = resolvedEmbedModel
 
 	limits := tools.DefaultLimits()
 	limits.MaxReadBytes = *maxReadBytes
@@ -132,7 +151,7 @@ Flags:
 		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, *maxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr)
+	session := newChatSession(client, root, limits, settings, resolvedEmbedModel, resolvedMaxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr)
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
@@ -165,6 +184,7 @@ type chatSession struct {
 	root          *security.Root
 	limits        tools.Limits
 	settings      *config.Settings
+	embedModel    string
 	maxToolCalls  int
 	verbose       bool
 	showReasoning bool
@@ -179,12 +199,13 @@ type chatSession struct {
 	registry  *tools.Registry
 }
 
-func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
+func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, embedModel string, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
 	return &chatSession{
 		client:        client,
 		root:          root,
 		limits:        limits,
 		settings:      settings,
+		embedModel:    embedModel,
 		maxToolCalls:  maxToolCalls,
 		verbose:       verbose,
 		showReasoning: showReasoning,
@@ -204,7 +225,7 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 		fmt.Fprintf(s.verboseWriter, "warning: could not check capabilities for %s, assuming no vision support and no context-length warnings: %v\n", model, err)
 	}
 
-	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), s.client, model)
+	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), s.client, s.embedModel)
 	ag := agent.New(s.client, registry, agent.Options{
 		Model:         model,
 		MaxToolCalls:  s.maxToolCalls,
@@ -294,7 +315,7 @@ const maxHistoryEntries = 100
 // each answer is printed as a buffered JSON object instead of streamed text.
 func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:       "> ",
+		Prompt:       ">>> ",
 		HistoryFile:  historyFilePath(),
 		HistoryLimit: maxHistoryEntries,
 	})
@@ -303,13 +324,14 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	}
 	defer rl.Close()
 
-	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\nType your question, 'exit'/'quit' or Ctrl-D to leave, or /help for commands.\n", version, session.workingDir, session.model)
+	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\nUse Ctrl + d or /bye to exit, or /help for commands.\n\n", version, session.workingDir, session.model)
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
 		line, err := rl.Readline()
 		if errors.Is(err, readline.ErrInterrupt) {
-			// Ctrl-C: clear the current line and reprompt rather than exiting.
+			// Ctrl-C: show exit hint and reprompt rather than exiting.
+			fmt.Fprintf(rl.Stdout(), "\nUse Ctrl + d or /bye to exit.\n")
 			continue
 		}
 		if errors.Is(err, io.EOF) {
@@ -323,11 +345,14 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		if line == "" {
 			continue
 		}
-		if line == "exit" || line == "quit" {
+		if line == "exit" || line == "quit" || line == "/bye" {
 			return nil
 		}
 
 		if strings.HasPrefix(line, "/") {
+			if line == "/bye" {
+				return nil
+			}
 			history = handleSlashCommand(ctx, rl, line, history, session)
 			continue
 		}
@@ -341,17 +366,23 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		session.ag.SetSpinner(sp)
 		sp.Start()
 
-		// Create a cancellable context for this agent run so Ctrl-C can interrupt it
+		// Create a cancellable context for this agent run so Ctrl-C can interrupt it.
 		runCtx, cancel := context.WithCancel(ctx)
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT)
+		turnDone := make(chan struct{})
 		go func() {
-			<-sigChan
-			cancel()
+			select {
+			case <-sigChan:
+				cancel()
+			case <-turnDone:
+				// Run finished normally; exit without leaking this goroutine.
+			}
 		}()
 
 		result, err := session.ag.Run(runCtx, history)
 		signal.Stop(sigChan)
+		close(turnDone) // unblock the watcher goroutine
 		cancel()
 
 		if err != nil {
@@ -391,7 +422,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintln(out, "  /save <file>       save the conversation transcript to a file")
 		fmt.Fprintln(out, "  /copy              copy the last answer to clipboard")
 		fmt.Fprintln(out, "  /help              show this message")
-		fmt.Fprintln(out, "  exit, quit         leave the chat (Ctrl-D also works)")
+		fmt.Fprintln(out, "  exit, quit, /bye   leave the chat (Ctrl-D also works)")
 		return history
 
 	case "/clear":

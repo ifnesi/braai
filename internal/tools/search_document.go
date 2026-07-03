@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 
 	"braai/internal/ollama"
 	"braai/internal/textextract"
@@ -90,18 +89,20 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 		return Result{}, err
 	}
 
-	// Extract and chunk the document (same as read_document).
-	text, err := textextract.ExtractText(absPath)
-	if err != nil {
-		return Result{}, fmt.Errorf("extract text: %w", err)
+	if r.chunkEmbedder == nil {
+		return Result{}, fmt.Errorf("embedding not available; configure an Ollama model with embedding support")
 	}
 
-	// Clean for consistency with read_document.
-	text = textextract.CleanForLLM(text)
-	text = textextract.NormalizeWhitespace(text)
-
-	source := filepath.Base(absPath)
-	chunks := textextract.ChunkText(text, 2000, source)
+	// Reuse cached chunks (from read_document/get_chunk) when present so
+	// indices are consistent and we don't re-extract needlessly.
+	chunks, ok := r.documentChunkCache[relPath]
+	if !ok {
+		chunks, err = r.extractChunks(absPath)
+		if err != nil {
+			return Result{}, err
+		}
+		r.documentChunkCache[relPath] = chunks
+	}
 
 	if len(chunks) == 0 {
 		out := searchDocumentResult{
@@ -113,23 +114,12 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 		return textResult(string(jsonOut)), nil
 	}
 
-	// Create an embedder (reuses the Registry's embedding infrastructure).
-	if r.embedClient == nil {
-		return Result{}, fmt.Errorf("embedding not available; configure an Ollama model with embedding support")
-	}
-
-	embedder := textextract.NewChunkEmbedder(func(ctx context.Context, model string, texts []string) ([][]float32, error) {
-		return r.embedClient.Embed(ctx, model, texts)
-	})
-
-	// Embed the chunks.
-	chunksWithEmbed, err := embedder.EmbedChunks(ctx, r.embedModel, absPath, chunks)
+	chunksWithEmbed, err := r.chunkEmbedder.EmbedChunks(ctx, r.embedModel, absPath, chunks)
 	if err != nil {
 		return Result{}, fmt.Errorf("embed chunks: %w", err)
 	}
 
-	// Search for similar chunks.
-	ranked, err := embedder.SearchChunks(ctx, r.embedModel, query, chunksWithEmbed, topK, threshold)
+	ranked, err := r.chunkEmbedder.SearchChunks(ctx, r.embedModel, query, chunksWithEmbed, topK, threshold)
 	if err != nil {
 		return Result{}, fmt.Errorf("search chunks: %w", err)
 	}
@@ -139,7 +129,6 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 		Results: ranked,
 		Count:   len(ranked),
 	}
-
 	jsonOut, _ := json.MarshalIndent(out, "", "  ")
 	return textResult(string(jsonOut)), nil
 }

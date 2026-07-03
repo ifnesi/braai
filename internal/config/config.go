@@ -12,6 +12,7 @@ import (
 type Settings struct {
 	OllamaHost   string `json:"ollama_host,omitempty"`
 	Model        string `json:"model,omitempty"`
+	EmbedModel   string `json:"embed_model,omitempty"`
 	MaxToolCalls int    `json:"max_tool_calls,omitempty"`
 }
 

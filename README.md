@@ -109,8 +109,10 @@ The interactive chat uses a `>>>` prompt and supports standard readline-style
 line editing: left/right arrows to move within the line, Ctrl-A/Ctrl-E to
 jump to the start/end, Ctrl-C to clear the current input (shows a hint to exit
 via Ctrl + d or `/bye`), and up/down arrows to recall history from previous
-sessions (persisted to `~/.braai/chat_history`, capped at the last 100
-entries — the file is trimmed to that limit every time braai starts).
+sessions. Chat history is persisted to `~/.braai/chat_history` **encrypted at rest**
+with AES-256-GCM (using the machine-local key at `~/.braai/cache.key`), so no
+plaintext prompts are written to disk. The history limit is configured in
+`~/.braai/braai.conf` via `history_limit` (default: 100 entries).
 
 When the model produces reasoning/thinking (on models that support it), it's
 shown with bold **Thinking...** and **...done thinking.** markers so it's
@@ -124,13 +126,13 @@ A few slash-commands are available inside the chat:
 | `/clear` | Reset the conversation history and clear the visible screen (start fresh without restarting) |
 | `/copy` | Copy the last answer to clipboard |
 | `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl + d, also works) |
-| `/forget-history` | Erase `~/.braai/chat_history` — the up/down arrow recall history — separate from the conversation itself |
+| `/forget-history` | Erase `~/.braai/chat_history` (the encrypted up/down arrow recall history, separate from the conversation itself) |
 | `/tools` | List the tools currently available to the model (name + description) |
 | `/tools full` | Same as `/tools`, but also shows each tool's arguments (type, whether required, and description) |
 | `/cache` | Show semantic-search cache stats for the current directory (files, chunks, size on disk) |
 | `/cache clear` | Delete the semantic-search cache for the current directory |
 | `/model` | Show the current model and list every model available on the Ollama server |
-| `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/settings.json`) |
+| `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/braai.conf`) |
 | `/save <file>` | Save the visible conversation (your messages + braai's answers) as Markdown |
 
 If the conversation is getting close to the model's context window, braai
@@ -169,20 +171,43 @@ restarting with a different `--model` flag.
 ### Configuration file
 
 `braai` persists your last-used Ollama host, chat model, embedding model, and
-max tool calls to `~/.braai/settings.json` so subsequent runs can reuse them
-as defaults. Command-line flags always take precedence over this file, and
-values you set by hand in the file are preserved (they aren't clobbered by
-runtime defaults).
+other settings to `~/.braai/braai.conf` (key=value format with comments) so
+subsequent runs can reuse them as defaults. Command-line flags always take
+precedence over this file, and values you set by hand in the file are preserved
+(they aren't clobbered by runtime defaults).
 
-Example `~/.braai/settings.json`:
+Example `~/.braai/braai.conf`:
 
-```json
-{
-  "ollama_host": "http://localhost:11434",
-  "model": "gemma4:12b-mlx",
-  "embed_model": "minishlab/potion-retrieval-32M",
-  "max_tool_calls": 100
-}
+```conf
+# braai configuration
+# Key=value format. Lines starting with # are comments.
+
+# Ollama API host
+ollama_host=http://localhost:11434
+
+# Default chat model
+model=gemma4:12b-mlx
+
+# Default embedding model (Hugging Face repo)
+embed_model=minishlab/potion-retrieval-32M
+
+# Maximum tool calls per request
+max_tool_calls=100
+
+# Maximum number of recall history entries
+history_limit=100
+
+# Cache extracted text from documents (true/false)
+cache_extracted_text=true
+
+# Cache compression method (flate or none)
+cache_compression=flate
+
+# Encrypt cache at rest (true/false)
+cache_encryption=true
+
+# Total cache size in bytes (0 = 1 GiB default)
+cache_max_bytes=0
 ```
 
 Core settings:
@@ -197,6 +222,8 @@ Core settings:
   rebuilds the semantic cache, since embeddings from different models aren't
   comparable.
 - `max_tool_calls` — Max tool invocations per response before aborting (default: `100`)
+- `history_limit` — Max number of chat history entries kept for up/down arrow recall
+  (default: `100`)
 
 Semantic-cache settings (all optional; secure defaults apply when omitted):
 
@@ -204,13 +231,13 @@ Semantic-cache settings (all optional; secure defaults apply when omitted):
   is instant and doesn't re-extract (default: `true`). Set to `false` for a
   privacy-first mode: only embeddings/metadata are cached, and document text is
   re-extracted on demand — no document text is ever written to disk.
-- `cache_compression` — `"flate"` (default) or `"none"`. Compresses cached text
-  blobs.
+- `cache_compression` — `flate` (default) or `none`. Compresses cached text blobs.
 - `cache_encryption` — Encrypt cached text blobs at rest with AES-256-GCM
   (default: `true`). The key is a machine-local file at `~/.braai/cache.key`
   (see [Security model](#security-model)).
 - `cache_max_bytes` — Total on-disk budget for cached blobs before least-recently-used
-  eviction kicks in (default: `1073741824`, i.e. 1 GiB).
+  eviction kicks in (default: `0`, i.e. 1 GiB). Set to `0` to use the default; any
+  positive value caps the cache size.
 
 ## Read-only toolset
 
@@ -339,18 +366,19 @@ already validated — `pdftotext` for higher-quality PDF extraction when it's
 installed, and a clipboard utility such as `pbcopy`/`xclip`/`xsel` for the
 `/copy` command. Neither is controllable by the model.)
 
-**Cache files.** The semantic cache can contain readable text extracted from
-your documents, so braai protects it:
+**Cache and history files.** The semantic cache and chat history can contain
+readable text from your documents or chat prompts, so braai protects both:
 
 - `~/.braai/cache/` and `~/.braai/models/` are created owner-only (`0700`).
-- The cache index, all cache blobs, and the encryption key file
+- The cache index, all cache blobs, chat history file, and the encryption key
   (`~/.braai/cache.key`) are written owner-only (`0600`).
-- Cached document text is compressed and AES-256-GCM-encrypted at rest by
-  default, using the machine-local key. This protects the cache if it's copied
-  off the machine (e.g. into backups or a synced folder). It does **not**
-  protect against someone who already has full read access to your home
-  directory (they can read the key too). For stronger guarantees, set
-  `cache_extracted_text: false` so no document text is ever written to disk.
+- Both cached document text and chat history are compressed (cache only) and
+  AES-256-GCM-encrypted at rest by default, using the same machine-local key.
+  This protects both if they're copied off the machine (e.g. into backups or a
+  synced folder). Encryption does **not** protect against someone who already
+  has full read access to your home directory (they can read the key too). For
+  stronger guarantees with the cache, set `cache_extracted_text: false` so no
+  document text is ever written to disk (chat history remains encrypted).
 
 ## Architecture
 
@@ -363,7 +391,7 @@ internal/staticembed/         In-process model2vec static embeddings (tokenizer,
 internal/cache/               Persistent, compressed, encrypted semantic-search cache
 internal/textextract/         Document extraction + chunking (PDF, Office, HTML, CSV, ...)
 internal/security/path.go     Path confinement/validation helpers
-internal/config/config.go     ~/.braai/settings.json persistence + cache/model dir helpers
+internal/config/config.go     ~/.braai/braai.conf persistence + cache/model dir helpers
 internal/terminal/            TTY/color detection and styling
 ```
 

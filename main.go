@@ -22,6 +22,7 @@ import (
 	"braai/internal/agent"
 	"braai/internal/cache"
 	"braai/internal/config"
+	"braai/internal/history"
 	"braai/internal/ollama"
 	"braai/internal/security"
 	"braai/internal/staticembed"
@@ -30,7 +31,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.6"
+const version = "0.0.7"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -48,14 +49,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 
 	var (
-		ollamaHost    = fs.String("ollama-host", "", "Ollama server base URL (default http://localhost:11434, or ~/.braai/settings.json)")
+		ollamaHost    = fs.String("ollama-host", "", "Ollama server base URL (default http://localhost:11434, or ~/.braai/braai.conf)")
 		model         = fs.String("model", "", "Ollama model name to use (default: first model available on the server)")
-		embedModel    = fs.String("embed-model", "", "Hugging Face repo of the static embedding model for semantic search. Default: minishlab/potion-retrieval-32M, or ~/.braai/settings.json")
+		embedModel    = fs.String("embed-model", "", "Hugging Face repo of the static embedding model for semantic search. Default: minishlab/potion-retrieval-32M, or ~/.braai/braai.conf")
 		workingDir    = fs.String("working-dir", "", "Root directory the agent may inspect (default: current directory)")
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
 		verbose       = fs.Bool("verbose", false, "Print tool calls and intermediate steps")
 		hideReasoning = fs.Bool("hide-reasoning", false, "Don't stream the model's reasoning/thinking trace before its answer (shown by default, on models that support it)")
-		maxToolCalls  = fs.Int("max-tool-calls", 0, "Maximum number of tool calls per request (default 100, or ~/.braai/settings.json)")
+		maxToolCalls  = fs.Int("max-tool-calls", 0, "Maximum number of tool calls per request (default 100, or ~/.braai/braai.conf)")
 		maxReadBytes  = fs.Int("max-read-bytes", -1, "Maximum bytes read_file returns (-1 = no limit)")
 		showVersion   = fs.Bool("version", false, "Print the braai version and exit")
 		outputFormat  = fs.String("output", "text", `Output format: "text" (default, streamed to stdout as produced) or "json" (buffered; a single JSON object per answer with the answer, reasoning, and tool calls used)`)
@@ -99,6 +100,11 @@ Flags:
 		return fmt.Errorf("load settings: %w", err)
 	}
 
+	// Apply defaults to any missing optional fields and persist if modified
+	if config.ApplyDefaults(settings) {
+		_ = config.Save(settings) // best-effort; don't fail if save fails
+	}
+
 	host := firstNonEmpty(*ollamaHost, settings.OllamaHost, "http://localhost:11434")
 	dir := *workingDir
 	if dir == "" {
@@ -127,7 +133,7 @@ Flags:
 	// (also used at runtime by /model), so it isn't set here.
 	// Precedence: explicit flag (>0) wins, then persisted settings, then the
 	// built-in default. Persist the effective value without clobbering a
-	// user-edited settings.json with the flag's zero default.
+	// user-edited braai.conf with the flag's zero default.
 	resolvedMaxToolCalls := *maxToolCalls
 	if resolvedMaxToolCalls <= 0 {
 		resolvedMaxToolCalls = settings.MaxToolCalls
@@ -157,8 +163,9 @@ Flags:
 		cacheCompression = "flate"
 	}
 	cacheMaxBytes := settings.CacheMaxBytes
-	if cacheMaxBytes <= 0 {
-		cacheMaxBytes = 1 << 30 // 1 GiB
+	// ApplyDefaults ensures this is never 0, but < 0 means unbounded (pass through).
+	if cacheMaxBytes == 0 {
+		cacheMaxBytes = 1 << 30 // 1 GiB (should not happen if ApplyDefaults ran)
 	}
 
 	// Load the in-process static embedding model (downloaded from Hugging Face
@@ -253,6 +260,7 @@ type chatSession struct {
 	ag        *agent.Agent
 	registry  *tools.Registry
 	cache     *cache.Cache
+	hist      *history.Store
 }
 
 func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, embedModel string, embedder *staticembed.Model, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer, semanticCache *cache.Cache) *chatSession {
@@ -276,7 +284,7 @@ func newChatSession(client *ollama.Client, root *security.Root, limits tools.Lim
 
 // switchModel rebuilds the tool registry and agent for model (re-checking
 // vision support and context length, since both are model-specific) and
-// persists it to ~/.braai/settings.json as the new default.
+// persists it to ~/.braai/braai.conf as the new default.
 func (s *chatSession) switchModel(ctx context.Context, model string) error {
 	info, err := s.client.ShowModel(ctx, model)
 	if err != nil && s.verbose {
@@ -365,36 +373,58 @@ func printJSONResult(w io.Writer, result agent.RunResult) error {
 	return enc.Encode(result)
 }
 
-// maxHistoryEntries caps how many lines are kept in ~/.braai/chat_history.
-// Readline trims the on-disk file to this limit itself as soon as it opens
-// it, so the file is adjusted every time braai starts, not just on save.
-const maxHistoryEntries = 100
-
 // runChat drives an interactive prompt with readline-style line editing:
 // left/right arrows, Ctrl-A/Ctrl-E to jump to the start/end of the line, and
 // Ctrl-C to clear the current input instead of killing the process (Ctrl + d
-// or 'exit'/'quit' still leave the chat). A few slash-commands are also
-// available: /clear, /tools, /save <file>, /help. When jsonOutput is set,
+// or /bye/exit/quit leave the chat). Slash-commands include /clear, /copy, /cache,
+// /tools, /model, /save, /forget-history, and /help. When jsonOutput is set,
 // each answer is printed as a buffered JSON object instead of streamed text.
 func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
+	historyLimit := session.settings.HistoryLimit
+	if historyLimit <= 0 {
+		historyLimit = 100
+	}
+
+	// Note: We set readline's HistoryLimit to 10x our persistent limit so that
+	// readline's in-memory buffer doesn't interfere with our persistence logic.
+	// We manage history persistence ourselves via history.Store, so readline's
+	// limit shouldn't crop our entries during the session.
+	readlineHistoryLimit := historyLimit * 10
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       ">>> ",
-		HistoryFile:  historyFilePath(),
-		HistoryLimit: maxHistoryEntries,
+		HistoryLimit: readlineHistoryLimit,
+		HistoryFile:  "", // Empty disables readline's file persistence; we manage history ourselves
 	})
 	if err != nil {
 		return fmt.Errorf("start interactive prompt: %w", err)
 	}
 	defer rl.Close()
 
-	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\nUse Ctrl + d or /bye to exit, or /help for commands.\n\n", version, session.workingDir, session.model)
+	// Load the encrypted recall history and seed readline's in-memory history so
+	// up/down-arrow recall works across sessions — without ever writing a
+	// plaintext history file to disk.
+	keyPath, _ := config.CacheKeyPath()
+	if hist, herr := history.Open(historyFilePath(), keyPath, historyLimit); herr == nil {
+		session.hist = hist
+		histLines := hist.Lines()
+		for _, h := range histLines {
+			_ = rl.SaveHistory(h)
+		}
+	} else if session.verbose {
+		fmt.Fprintf(os.Stderr, "warning: could not open encrypted chat history: %v\n", herr)
+	}
+
+	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\n\nUse Ctrl + d or /bye to exit, or /help for commands.\n", version, session.workingDir, session.model)
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
 		line, err := rl.Readline()
 		if errors.Is(err, readline.ErrInterrupt) {
-			// Ctrl-C: show exit hint and reprompt rather than exiting.
-			fmt.Fprintf(rl.Stdout(), "\nUse Ctrl + d or /bye to exit.\n")
+			// Ctrl-C: reset any open ANSI styling (e.g. dim codes from thinking),
+			// show exit hint, and reprompt rather than exiting.
+			fmt.Fprint(rl.Stdout(), terminal.Reset(session.colorLevel))
+			fmt.Fprintf(rl.Stdout(), "\nUse Ctrl + d or /bye to exit, or /help for commands.\n")
 			continue
 		}
 		if errors.Is(err, io.EOF) {
@@ -408,14 +438,15 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		if line == "" {
 			continue
 		}
+		// Persist to the encrypted recall history (skip bare exit synonyms).
+		if line != "exit" && line != "quit" && line != "/bye" {
+			_ = session.hist.Add(line)
+		}
 		if line == "exit" || line == "quit" || line == "/bye" {
 			return nil
 		}
 
 		if strings.HasPrefix(line, "/") {
-			if line == "/bye" {
-				return nil
-			}
 			history = handleSlashCommand(ctx, rl, line, history, session)
 			continue
 		}
@@ -451,6 +482,9 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		if err != nil {
 			sp.Stop() // erase spinner before printing error
 			if errors.Is(err, context.Canceled) {
+				// Context cancelled by Ctrl-C: reset terminal styling that was open
+				// during agent execution (e.g. dim codes from thinking output).
+				fmt.Fprint(rl.Stdout(), terminal.Reset(session.colorLevel))
 				fmt.Fprintf(rl.Stdout(), "\n")
 				continue
 			}
@@ -502,13 +536,12 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		return []ollama.Message{agent.SystemMessage()}
 
 	case "/forget-history":
-		// This is the persisted up/down recall history (~/.braai/chat_history),
-		// distinct from /clear's conversation context — wipe both the on-disk
-		// file and the in-memory copy readline is holding for this session.
-		path := historyFilePath()
-		if path != "" {
-			if err := os.WriteFile(path, nil, 0o644); err != nil {
-				fmt.Fprintf(out, "could not erase %s: %v\n", path, err)
+		// This is the persisted up/down recall history (encrypted at
+		// ~/.braai/chat_history), distinct from /clear's conversation context —
+		// wipe both the on-disk file and the in-memory copy readline is holding.
+		if session.hist != nil {
+			if err := session.hist.Clear(); err != nil {
+				fmt.Fprintf(out, "could not erase chat history: %v\n", err)
 				return history
 			}
 		}
@@ -689,12 +722,8 @@ func printToolArgs(out io.Writer, colorLevel terminal.Level, params map[string]a
 	}
 }
 
-// saveTranscript writes the user-visible parts of a conversation (skipping
-// the system prompt and internal tool-call plumbing) as readable Markdown.
-// The path is resolved relative to the process's current directory, exactly
-// like shell output redirection would — this is a user-initiated save of
-// their own conversation, not something the model can trigger.
-// formatTranscript formats the conversation history as a readable string.
+// formatTranscript formats the conversation history as a readable string,
+// skipping the system prompt and internal tool-call plumbing.
 func formatTranscript(history []ollama.Message) (string, error) {
 	var b strings.Builder
 	for _, m := range history {
@@ -711,6 +740,10 @@ func formatTranscript(history []ollama.Message) (string, error) {
 	return b.String(), nil
 }
 
+// saveTranscript writes the user-visible parts of a conversation as readable Markdown.
+// The path is resolved relative to the process's current directory, exactly like
+// shell output redirection would — this is a user-initiated save of their own
+// conversation, not something the model can trigger.
 func saveTranscript(path string, history []ollama.Message) error {
 	transcript, err := formatTranscript(history)
 	if err != nil {
@@ -726,7 +759,7 @@ func historyFilePath() string {
 	if err != nil {
 		return ""
 	}
-	return dir + "/chat_history"
+	return filepath.Join(dir, "chat_history")
 }
 
 // expandTilde expands a leading "~" or "~/..." to the current user's home

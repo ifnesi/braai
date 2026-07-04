@@ -38,3 +38,4 @@ go.work.sum
 /braai
 .test/
 .claude/
+.roadmap.md

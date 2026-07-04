@@ -1,0 +1,82 @@
+braai — Release Notes
+=====================
+
+All notable changes to this project are documented in this file.
+
+Format is based on "Keep a Changelog" (https://keepachangelog.com), and this
+project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
+  - MAJOR: incompatible / breaking changes
+  - MINOR: new, backward-compatible functionality
+  - PATCH: backward-compatible bug fixes
+
+The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
+Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
+
+[0.1.0] - 2026-07-04
+--------------------
+
+Added
+  - Custom prompt-template commands (/cmd). Users can now create reusable prompt
+    templates as Markdown files in ~/.braai/commands/ (global) or <working-dir>/
+    .braai/commands/ (per-project, overrides global). Templates support variable
+    substitution: $ARGS (all args), $1-$9 (positional), $SELECTION (last answer),
+    and $$ (literal $). Invoked as "/cmd <name> [args...]"; "/cmd" alone lists
+    available commands. Frontmatter (description, args) is optional. Templates
+    are pure prompts—they expand and submit as normal turns, with no new
+    security surface.
+
+
+[0.0.7] - 2026-07-04
+--------------------
+Changed
+  - Configuration moved from ~/.braai/settings.json (JSON) to
+    ~/.braai/braai.conf (key=value). Files are now human-editable and support
+    comments; your comments are preserved across restarts.
+  - Config saves are merge-based: only known keys are updated, while comments
+    and unknown keys are left untouched.
+  - Config writes are now atomic, preventing file truncation if a save is
+    interrupted.
+
+Added
+  - New history_limit setting (default 100) controlling chat recall history size.
+  - Chat recall history now persists across sessions for up/down arrow recall.
+  - /forget-history command to clear the chat recall history.
+
+Security
+  - Chat recall history is now encrypted at rest using AES-256-GCM, stored at
+    ~/.braai/chat_history with no plaintext prompts on disk. Uses a machine-local
+    key at ~/.braai/cache.key (shared with the semantic cache).
+  - Removed debug output that printed decrypted history in plaintext to stderr.
+
+Fixed
+  - Config comments were being destroyed on every startup.
+  - History file path used a non-portable "/dev/null" setting on Windows
+    (now uses an empty string).
+  - History file path used string concatenation instead of filepath.Join,
+    producing wrong separators on Windows.
+
+Notes
+  - Semantic cache is unchanged: still AES-256-GCM encrypted at rest,
+    persistent, compressed, with LRU eviction, and using in-process static
+    embeddings (no Ollama required for embeddings).
+
+Upgrade
+  - Recreate your configuration in ~/.braai/braai.conf using the new key=value
+    format; the previous ~/.braai/settings.json is no longer read.
+  - Any existing plaintext ~/.braai/chat_history is discarded on first launch
+    and replaced with an encrypted store.
+
+
+[0.0.1] - 2026-07-01
+--------------------
+Added
+  - Initial release: read-only local AI agent CLI over a working directory,
+    powered by a local Ollama chat model.
+  - Read-only toolset: list_dir, read_file, read_files, search_name,
+    search_content, search_semantic, read_document, search_document, get_chunk,
+    find_all_files, stat_file, and read_image (vision-capable models only).
+  - Semantic search with in-process static embeddings and a persistent,
+    compressed, AES-256-GCM-encrypted on-disk cache with LRU eviction.
+  - Interactive chat with slash commands (/help, /clear, /copy, /tools,
+    /tools full, /cache, /model, /save, /forget-history, /bye) and streamed
+    reasoning + answers.

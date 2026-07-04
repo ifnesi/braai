@@ -97,6 +97,20 @@ func ModelsDir() (string, error) {
 	return md, nil
 }
 
+// CommandsDir returns ~/.braai/commands (the global custom-command directory),
+// creating it 0700. Per-project commands live in <working-dir>/.braai/commands.
+func CommandsDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	cd := filepath.Join(dir, "commands")
+	if err := os.MkdirAll(cd, 0o700); err != nil {
+		return "", err
+	}
+	return cd, nil
+}
+
 // Load reads braai.conf (key=value format with comments), returning empty Settings if not found.
 func Load() (*Settings, error) {
 	path, err := ConfPath()

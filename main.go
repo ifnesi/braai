@@ -21,6 +21,7 @@ import (
 
 	"braai/internal/agent"
 	"braai/internal/cache"
+	"braai/internal/commands"
 	"braai/internal/config"
 	"braai/internal/history"
 	"braai/internal/ollama"
@@ -31,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.7"
+const version = "0.1.0"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -447,8 +448,20 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		}
 
 		if strings.HasPrefix(line, "/") {
-			history = handleSlashCommand(ctx, rl, line, history, session)
-			continue
+			// Custom prompt-template commands: /cmd [name [args...]].
+			// A named command expands to a prompt and falls through to run as a
+			// normal user turn; listing/errors are handled inside and loop.
+			if line == "/cmd" || strings.HasPrefix(line, "/cmd ") {
+				expanded, run := session.expandCmd(rl.Stdout(), line, history)
+				if !run {
+					continue
+				}
+				fmt.Fprintf(rl.Stdout(), "%s\n\n", terminal.Dim(session.colorLevel, expanded))
+				line = expanded // submit the expanded template as this turn's prompt
+			} else {
+				history = handleSlashCommand(ctx, rl, line, history, session)
+				continue
+			}
 		}
 
 		history = append(history, ollama.Message{Role: "user", Content: line})
@@ -519,6 +532,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintf(out, "  %s%s save the conversation transcript to a file\n", terminal.Bold(session.colorLevel, "/save <file>"), strings.Repeat(" ", 18-len("/save <file>")))
 		fmt.Fprintf(out, "  %s%s copy the last answer to clipboard\n", terminal.Bold(session.colorLevel, "/copy"), strings.Repeat(" ", 18-len("/copy")))
 		fmt.Fprintf(out, "  %s%s show or clear the semantic-search cache (/cache clear)\n", terminal.Bold(session.colorLevel, "/cache"), strings.Repeat(" ", 18-len("/cache")))
+		fmt.Fprintf(out, "  %s%s run a custom prompt template (/cmd to list them)\n", terminal.Bold(session.colorLevel, "/cmd [name...]"), strings.Repeat(" ", 18-len("/cmd [name...]")))
 		fmt.Fprintf(out, "  %s%s show this message\n", terminal.Bold(session.colorLevel, "/help"), strings.Repeat(" ", 18-len("/help")))
 		fmt.Fprintf(out, "  %s%s leave the chat (Ctrl + d, also works)\n", terminal.Bold(session.colorLevel, "/bye, exit, quit"), strings.Repeat(" ", 18-len("/bye, exit, quit")))
 		return history
@@ -656,6 +670,70 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintf(out, "unknown command %q; try /help\n", cmd)
 		return history
 	}
+}
+
+// expandCmd implements the /cmd custom-command dispatcher. With no name it lists
+// available commands (global + per-project) and returns run=false. With a name
+// it loads the template, substitutes variables, and returns the expanded prompt
+// with run=true so the caller submits it as a normal user turn. Unknown commands
+// and empty expansions print to out and return run=false.
+func (s *chatSession) expandCmd(out io.Writer, line string, history []ollama.Message) (string, bool) {
+	fields := strings.Fields(line)
+
+	globalDir, _ := config.CommandsDir()
+	projectDir := filepath.Join(s.workingDir, ".braai", "commands")
+	cmds := commands.Load(globalDir, projectDir)
+
+	// "/cmd" alone: list available commands.
+	if len(fields) < 2 {
+		if len(cmds) == 0 {
+			fmt.Fprintf(out, "No custom commands found.\nCreate *.md prompt templates in:\n  %s  (global)\n  %s  (this project)\n",
+				globalDir, projectDir)
+			return "", false
+		}
+		names := make([]string, 0, len(cmds))
+		for n := range cmds {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(out, "Custom commands (%d):\n", len(cmds))
+		for _, n := range names {
+			c := cmds[n]
+			header := "/cmd " + n
+			if u := c.Usage(); u != "" {
+				header += " " + u
+			}
+			fmt.Fprintf(out, "\n  %s  (%s)\n", terminal.Bold(s.colorLevel, header), c.Source)
+			if c.Description != "" {
+				fmt.Fprintf(out, "    %s\n", c.Description)
+			}
+		}
+		return "", false
+	}
+
+	name := fields[1]
+	c, ok := cmds[name]
+	if !ok {
+		fmt.Fprintf(out, "unknown command %q; type /cmd to list available commands\n", name)
+		return "", false
+	}
+	prompt := c.Expand(fields[2:], lastAssistantMessage(history))
+	if prompt == "" {
+		fmt.Fprintf(out, "command %q produced an empty prompt\n", name)
+		return "", false
+	}
+	return prompt, true
+}
+
+// lastAssistantMessage returns the text of the most recent assistant turn (used
+// for the $SELECTION template variable), or "" if there is none.
+func lastAssistantMessage(history []ollama.Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && history[i].Content != "" {
+			return history[i].Content
+		}
+	}
+	return ""
 }
 
 // printToolArgs renders a tool's JSON-Schema parameters (name, type, required

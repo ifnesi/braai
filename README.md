@@ -134,6 +134,8 @@ A few slash-commands are available inside the chat:
 | `/model` | Show the current model and list every model available on the Ollama server |
 | `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/braai.conf`) |
 | `/save <file>` | Save the visible conversation (your messages + braai's answers) as Markdown |
+| `/cmd` | List all available custom prompt-template commands |
+| `/cmd <name> [args...]` | Expand and run a custom prompt template |
 
 If the conversation is getting close to the model's context window, braai
 prints a warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
@@ -238,6 +240,81 @@ Semantic-cache settings (all optional; secure defaults apply when omitted):
 - `cache_max_bytes` — Total on-disk budget for cached blobs before least-recently-used
   eviction kicks in (default: `0`, i.e. 1 GiB). Set to `0` to use the default; any
   positive value caps the cache size.
+
+### Custom prompt-template commands
+
+Create reusable prompt templates as Markdown files to extend braai's chat interface with custom commands. Templates are pure prompts — they expand and submit as normal turns, with no new security surface.
+
+**Locations:**
+- Global: `~/.braai/commands/*.md`
+- Per-project: `<working-dir>/.braai/commands/*.md` (overrides global)
+
+**Template variables:**
+- `$ARGS` — all arguments joined by spaces
+- `$1`–`$9` — positional arguments (empty string if not supplied)
+- `$SELECTION` — text of the most recent assistant answer (empty if none)
+- `$$` — a literal `$`
+
+**Frontmatter (optional):**
+Markdown files can start with YAML-ish frontmatter between `---` delimiters to set a description and declare argument names (for listing and documentation):
+
+```markdown
+---
+description: Draft a standup from recent notes
+args: [date, project]
+---
+Read my notes and produce a standup for $1 on project $2.
+Focus on: $ARGS
+```
+
+**Usage:**
+
+```
+>>> /cmd                          # List available commands (global + per-project)
+>>> /cmd standup 2026-07-04       # Expand template with args, show dimmed, run as turn
+>>> /cmd summary                  # Use $SELECTION to summarize the last answer
+>>> /cmd nope                     # "unknown command" error
+>>> [up-arrow]                    # Recalls "/cmd standup ..." (not the expanded text)
+```
+
+**Examples:**
+
+File: `~/.braai/commands/standup.md`
+```markdown
+---
+description: Draft a standup from recent notes
+args: [date]
+---
+Read my notes in this directory and draft a concise standup update for $1.
+List: what I did, what's next, and any blockers.
+```
+
+File: `~/.braai/commands/tldr.md`
+```markdown
+---
+description: Summarize the previous answer in 3 bullets
+---
+Summarize the following in exactly three bullet points:
+
+$SELECTION
+```
+
+File: `.braai/commands/review.md` (project-level, overrides global)
+```markdown
+---
+description: Review code in the specified file
+args: [filepath]
+---
+Review the code in $1 for correctness, performance, and style.
+Point out any potential issues or improvements.
+```
+
+Invocation:
+```
+>>> /cmd standup 2026-07-04      # Expands and runs
+>>> /cmd tldr                     # Summarizes previous answer
+>>> /cmd review src/main.go       # Project-level command
+```
 
 ## Read-only toolset
 
@@ -389,9 +466,10 @@ internal/ollama/client.go     Minimal /api/chat, /api/tags, /api/show HTTP clien
 internal/tools/               The read-only tools + their JSON schemas
 internal/staticembed/         In-process model2vec static embeddings (tokenizer, safetensors, HF download)
 internal/cache/               Persistent, compressed, encrypted semantic-search cache
+internal/commands/            Custom prompt-template command loader + variable expansion
 internal/textextract/         Document extraction + chunking (PDF, Office, HTML, CSV, ...)
 internal/security/path.go     Path confinement/validation helpers
-internal/config/config.go     ~/.braai/braai.conf persistence + cache/model dir helpers
+internal/config/config.go     ~/.braai/braai.conf persistence + cache/model/commands dirs
 internal/terminal/            TTY/color detection and styling
 ```
 

@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"braai/internal/ollama"
 	"braai/internal/textextract"
@@ -15,7 +16,7 @@ func getChunkDefinition() ollama.Tool {
 			Name: "get_chunk",
 			Description: `Retrieve the full text of a specific chunk after reading or searching a document.
 
-First call read_document(path) or search_document(path, query) to get manifest or search results, then use this tool to fetch the full text of a chunk by its index (1-indexed).`,
+First call read_document(path), search_document(path, query), or search_semantic(query) to get a manifest / results with chunk indices, then use this tool to fetch the full text of a chunk by its index (1-indexed).`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -58,6 +59,31 @@ func (r *Registry) getChunk(args map[string]any) (Result, error) {
 		return Result{}, err
 	}
 
+	// Fast path: read the exact chunk text from the persistent (encrypted) cache
+	// blob, without re-extracting the document. Validated by mtime/size inside
+	// the cache; any miss/staleness falls through to re-extraction below.
+	if r.semanticCache != nil {
+		if info, statErr := os.Stat(absPath); statErr == nil {
+			if cc, ok := r.semanticCache.GetChunk(relPath, info.ModTime().UnixNano(), info.Size(), chunkIndex); ok {
+				out := getChunkResult{
+					Chunk: textextract.Chunk{
+						Index:   cc.Index,
+						Total:   cc.Total,
+						Source:  relPath,
+						Section: cc.Section,
+						Tokens:  cc.Tokens,
+						Text:    cc.Text,
+					},
+					Text: cc.Text,
+				}
+				jsonOut, _ := json.MarshalIndent(out, "", "  ")
+				return textResult(string(jsonOut)), nil
+			}
+		}
+	}
+
+	// Fallback: in-memory chunk cache, then re-extraction. Uses the same
+	// deterministic chunker (extractChunks) as the cache, so indices align.
 	chunks, ok := r.documentChunkCache[relPath]
 	if !ok {
 		chunks, err = r.extractChunks(absPath)

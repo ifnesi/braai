@@ -24,10 +24,10 @@ type EmbedFn func(ctx context.Context, model string, texts []string) ([][]float3
 
 // CachedChunks holds embedded chunks for a document.
 type CachedChunks struct {
-	Path              string
-	ModTime           int64
-	ChunkCount        int
-	ChunksWithEmbed   []ChunkWithEmbedding
+	Path            string
+	ModTime         int64
+	ChunkCount      int
+	ChunksWithEmbed []ChunkWithEmbedding
 }
 
 // NewChunkEmbedder creates a new embedder with the given embedding function.

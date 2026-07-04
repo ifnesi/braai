@@ -3,10 +3,15 @@
 `braai` is a small, read-only AI agent CLI that answers questions about a local
 working directory. It uses a local [Ollama](https://ollama.com) server for
 reasoning and lets the model call a fixed set of read-only filesystem tools
-(list, read, batch-read, search by name/content, read/extract/search documents,
-stat, and — on vision-capable models — read/OCR images) to gather evidence
-before answering. It never writes, deletes, or executes anything on your
-filesystem.
+(list, read, batch-read, search by name/content, semantic search across the
+whole tree, read/extract/search documents, stat, and — on vision-capable
+models — read/OCR images) to gather evidence before answering. It never writes,
+deletes, or executes anything on your filesystem.
+
+Semantic search runs on a **fast, in-process static embedding model** that braai
+downloads once from Hugging Face and runs itself — no Ollama embedding model and
+no server round-trip are needed for embeddings. Ollama is used only for the chat
+model.
 
 It works well as a local research assistant over a folder of meeting notes and
 audio transcripts, e.g. `braai --working-dir ~/notes/2026-Q3 "summarize this
@@ -17,11 +22,17 @@ week's meetings and flag any action items"` — see
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.21+ (the module currently pins `go 1.25`; lower the `go` directive in
+  `go.mod` if you need to build with an older toolchain).
 - A running local Ollama server (`ollama serve`) with at least one model
   pulled (e.g. `ollama pull llama3.1`). The model should support Ollama's
   native tool calling for best results (check with `ollama show <model>` —
   look for `tools` under capabilities).
+- Network access **on first use of semantic search only**, to download the
+  static embedding model from Hugging Face into `~/.braai/models/`. After that,
+  embeddings work fully offline.
+- Optional: `pdftotext` (from `poppler-utils`) on your `PATH` for higher-quality
+  PDF extraction. braai falls back to a pure-Go PDF reader when it's absent.
 
 ## Build
 
@@ -114,7 +125,10 @@ A few slash-commands are available inside the chat:
 | `/copy` | Copy the last answer to clipboard |
 | `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl + d, also works) |
 | `/forget-history` | Erase `~/.braai/chat_history` — the up/down arrow recall history — separate from the conversation itself |
-| `/tools` | List the tools currently available to the model |
+| `/tools` | List the tools currently available to the model (name + description) |
+| `/tools full` | Same as `/tools`, but also shows each tool's arguments (type, whether required, and description) |
+| `/cache` | Show semantic-search cache stats for the current directory (files, chunks, size on disk) |
+| `/cache clear` | Delete the semantic-search cache for the current directory |
 | `/model` | Show the current model and list every model available on the Ollama server |
 | `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/settings.json`) |
 | `/save <file>` | Save the visible conversation (your messages + braai's answers) as Markdown |
@@ -140,7 +154,8 @@ restarting with a different `--model` flag.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model` | first available | Ollama model to use |
+| `--model` | first available | Ollama chat model to use |
+| `--embed-model` | `minishlab/potion-retrieval-32M` | Hugging Face repo of the static embedding model used for semantic search (downloaded and run in-process) |
 | `--working-dir` | `.` | Root directory the agent may inspect |
 | `--ollama-host` | `http://localhost:11434` | Ollama server base URL |
 | `--prompt` | — | Run one prompt non-interactively (trailing args work the same way) |
@@ -153,9 +168,11 @@ restarting with a different `--model` flag.
 
 ### Configuration file
 
-`braai` persists your last-used Ollama host, model, embedding model, and
+`braai` persists your last-used Ollama host, chat model, embedding model, and
 max tool calls to `~/.braai/settings.json` so subsequent runs can reuse them
-as defaults. Command-line flags always take precedence over this file.
+as defaults. Command-line flags always take precedence over this file, and
+values you set by hand in the file are preserved (they aren't clobbered by
+runtime defaults).
 
 Example `~/.braai/settings.json`:
 
@@ -163,19 +180,42 @@ Example `~/.braai/settings.json`:
 {
   "ollama_host": "http://localhost:11434",
   "model": "gemma4:12b-mlx",
-  "embed_model": "nomic-embed-text",
+  "embed_model": "minishlab/potion-retrieval-32M",
   "max_tool_calls": 100
 }
 ```
 
+Core settings:
+
 - `ollama_host` — URL of your Ollama server (default: `http://localhost:11434`)
-- `model` — Default chat model to use (auto-detected from first available if omitted)
-- `embed_model` — Model used for semantic search/document analysis (default: `nomic-embed-text`)
+- `model` — Default chat model (auto-detected from first available if omitted)
+- `embed_model` — Hugging Face repo of the static embedding model used for
+  semantic search (default: `minishlab/potion-retrieval-32M`). This is **not**
+  an Ollama model — it's a model2vec static-embedding repo that braai downloads
+  to `~/.braai/models/` and runs in-process. Other options include
+  `minishlab/potion-multilingual-128M` (multilingual). Changing this transparently
+  rebuilds the semantic cache, since embeddings from different models aren't
+  comparable.
 - `max_tool_calls` — Max tool invocations per response before aborting (default: `100`)
+
+Semantic-cache settings (all optional; secure defaults apply when omitted):
+
+- `cache_extracted_text` — Persist extracted document text to disk so `get_chunk`
+  is instant and doesn't re-extract (default: `true`). Set to `false` for a
+  privacy-first mode: only embeddings/metadata are cached, and document text is
+  re-extracted on demand — no document text is ever written to disk.
+- `cache_compression` — `"flate"` (default) or `"none"`. Compresses cached text
+  blobs.
+- `cache_encryption` — Encrypt cached text blobs at rest with AES-256-GCM
+  (default: `true`). The key is a machine-local file at `~/.braai/cache.key`
+  (see [Security model](#security-model)).
+- `cache_max_bytes` — Total on-disk budget for cached blobs before least-recently-used
+  eviction kicks in (default: `1073741824`, i.e. 1 GiB).
 
 ## Read-only toolset
 
-The agent can only call the tools below, all confined to `--working-dir`:
+The agent can only call the tools below, all confined to `--working-dir`. Use
+`/tools full` inside the chat to see each tool's exact arguments.
 
 - **list_dir** — list entries in a directory. Supports recursion depth, an
   `extensions` filter (e.g. only `.md`/`.txt`), and `sort_by: modified_time`
@@ -192,33 +232,31 @@ The agent can only call the tools below, all confined to `--working-dir`:
 - **search_content** — plain-text search over file contents, returning file
   path, line number, and a short excerpt per match. Skips binary and
   oversized files.
-- **search_semantic** — search files by *meaning* rather than exact text,
-  using Ollama embeddings (e.g. "find notes about the pricing decision" even
-  if those exact words never appear). Ranks whole files by cosine similarity
-  to the query. This is a brute-force, all-in-memory implementation: no
-  vector database, no persistence — embeddings for files are computed lazily
-  on first use and cached in memory (keyed by path + mtime) for the lifetime
-  of the process, so repeated searches in one chat session don't recompute
-  them. Requires the Ollama server to actually support embeddings (some
-  builds need to be started with an embeddings flag); if it doesn't, the
-  tool returns a clear error and the model is expected to fall back to
-  `search_content`. Slower and coarser-grained (whole-file, not per-chunk)
-  than `search_content`, so prefer `search_content` for known substrings.
+- **search_semantic** — search the **entire working directory by meaning** and
+  return the most relevant *passages* (not just whole files), each with a file
+  path and a `chunk_index`. The model then calls `get_chunk(path, chunk_index)`
+  to read a matching passage in full. Every eligible file is extracted, chunked,
+  and embedded with the in-process static model; chunks are ranked by cosine
+  similarity to the query. Results and embeddings are persisted in an on-disk
+  cache (see [Semantic search & caching](#semantic-search--caching)), so repeated
+  searches — and searches in later sessions — are near-instant for unchanged
+  files. Prefer `search_content` for known exact substrings.
 - **read_document** — extract and optionally chunk text from documents (PDF,
   Word, Excel, PowerPoint, HTML, CSV, JSON, RTF, plaintext, etc.). If text
   is small (≤ 2000 tokens), returns it directly; if larger, returns a
   manifest of chunks that can be fetched individually with `get_chunk`.
   Supports `clean=true` to remove headers/footers/page numbers (default), or
   `clean=false` for raw text.
-- **search_document** — semantically search within a single document to find
+- **search_document** — semantically search *within a single document* to find
   relevant chunks (e.g., "find the authentication requirements chapter").
   Returns the top matching chunks ranked by semantic similarity, using the
-  same Ollama embeddings as `search_semantic` but at the sub-document level.
+  same in-process static embeddings as `search_semantic` but scoped to one file.
   Useful for large documents like manuals or specs.
 - **get_chunk** — fetch the full text of a specific chunk after reading or
-  searching a document. Call `read_document` or `search_document` first to
-  get a manifest or results, then use this to retrieve the full text of a
-  chunk by its 1-indexed number.
+  searching a document (or after `search_semantic`). Call `read_document`,
+  `search_document`, or `search_semantic` first to get chunk indices, then use
+  this to retrieve a chunk's full text by its 1-indexed number. When the cache
+  has the document's text, this is served from disk without re-extraction.
 - **find_all_files** — recursively list all files under a directory. Returns
   a compact JSON list of file paths. Useful for exploring large directory
   structures and discovering files without iterating with `list_dir`.
@@ -233,12 +271,53 @@ The agent can only call the tools below, all confined to `--working-dir`:
   offered at all, so the model won't try to "imagine" an image's contents.
   Images are capped at 10MB on disk.
 
-There are no write, delete, rename, mkdir, chmod, or shell-execution tools —
-this is intentional and hardcoded, not something that can be enabled.
+There are no write, delete, rename, mkdir, chmod, or shell-execution tools
+exposed to the model — this is intentional and hardcoded, not something that
+can be enabled.
 
 `.git`, `node_modules`, `vendor`, `.idea`, and `.DS_Store` are skipped by
-directory listing, name search, and content search for usability (see
-`internal/tools/tools.go`).
+directory listing, name search, content search, and semantic search for
+usability (see `internal/tools/tools.go`).
+
+## Semantic search & caching
+
+Semantic search is designed to be fast, reliable, and privacy-conscious.
+
+**In-process embeddings.** `search_semantic` and `search_document` use a
+[model2vec](https://github.com/MinishLab/model2vec) static embedding model that
+braai loads and runs itself. Static embeddings are a token→vector lookup plus
+mean-pool plus L2-normalize — no neural forward pass, no server, microseconds
+per chunk. The model files (`tokenizer.json`, `model.safetensors`, `config.json`)
+are downloaded once from Hugging Face into `~/.braai/models/<repo>/` and reused
+thereafter. Ollama is not involved in embeddings at all, so semantic search
+keeps working even with Ollama stopped.
+
+**Passage-level results.** Rather than ranking whole files, `search_semantic`
+chunks each file and ranks chunks across the whole tree, returning `path` +
+`chunk_index` + a similarity score + a short excerpt. This tells the model both
+*which file* and *where in it* the match is; it then fetches the full passage
+with `get_chunk`.
+
+**Persistent, compressed, encrypted cache.** Embeddings and chunk metadata are
+stored per project directory under `~/.braai/cache/`, keyed by each file's
+modification time and size (and by the embedding model). Unchanged files are
+never re-embedded — across runs, not just within a session — so repeat searches
+are near-instant. Extracted document text is stored in per-file blobs that are
+compressed (flate) and encrypted (AES-256-GCM) at rest by default. Only chunk
+metadata and embedding vectors live in memory; chunk text is read (and decrypted)
+from disk on demand, a few chunks at a time.
+
+**Invalidation and footprint.** A cache entry is rebuilt automatically when its
+file changes (mtime/size), when the embedding model changes, or when the on-disk
+format version changes; deleting `~/.braai/cache/` by hand is always safe. When
+total blob size exceeds `cache_max_bytes` (default 1 GiB), least-recently-used
+entries are evicted. Use `/cache` to see stats and `/cache clear` to wipe the
+current directory's cache.
+
+**Privacy switches.** Set `cache_extracted_text: false` to keep document text
+off disk entirely (embeddings still persist, but they can't be reversed into
+text). Encryption is on by default; see the security notes below for the key's
+threat model.
 
 ## Security model
 
@@ -253,18 +332,39 @@ All tool paths are resolved through `internal/security`, which:
   containment, so a symlink inside the working directory cannot be used to
   read a file outside it.
 
-No tool ever opens a file for writing, and there is no command-execution
-tool, so there is no path by which the agent can modify your filesystem.
+No tool ever opens a file for writing, and no command-execution tool is
+exposed to the model, so there is no path by which the agent can modify your
+filesystem. (braai itself may invoke two local helper binaries on paths it has
+already validated — `pdftotext` for higher-quality PDF extraction when it's
+installed, and a clipboard utility such as `pbcopy`/`xclip`/`xsel` for the
+`/copy` command. Neither is controllable by the model.)
+
+**Cache files.** The semantic cache can contain readable text extracted from
+your documents, so braai protects it:
+
+- `~/.braai/cache/` and `~/.braai/models/` are created owner-only (`0700`).
+- The cache index, all cache blobs, and the encryption key file
+  (`~/.braai/cache.key`) are written owner-only (`0600`).
+- Cached document text is compressed and AES-256-GCM-encrypted at rest by
+  default, using the machine-local key. This protects the cache if it's copied
+  off the machine (e.g. into backups or a synced folder). It does **not**
+  protect against someone who already has full read access to your home
+  directory (they can read the key too). For stronger guarantees, set
+  `cache_extracted_text: false` so no document text is ever written to disk.
 
 ## Architecture
 
 ```
-main.go                    CLI flag parsing, stdin/interactive wiring, model capability check
-internal/agent/agent.go    Chat + tool-calling loop, system prompt, streaming output
-internal/ollama/client.go  Minimal /api/chat, /api/tags, /api/show HTTP client
-internal/tools/            The read-only tools + their JSON schemas
-internal/security/path.go  Path confinement/validation helpers
-internal/config/config.go  ~/.braai/settings.json persistence
+main.go                       CLI flag parsing, stdin/interactive wiring, model capability check
+internal/agent/agent.go       Chat + tool-calling loop, system prompt, streaming output
+internal/ollama/client.go     Minimal /api/chat, /api/tags, /api/show HTTP client
+internal/tools/               The read-only tools + their JSON schemas
+internal/staticembed/         In-process model2vec static embeddings (tokenizer, safetensors, HF download)
+internal/cache/               Persistent, compressed, encrypted semantic-search cache
+internal/textextract/         Document extraction + chunking (PDF, Office, HTML, CSV, ...)
+internal/security/path.go     Path confinement/validation helpers
+internal/config/config.go     ~/.braai/settings.json persistence + cache/model dir helpers
+internal/terminal/            TTY/color detection and styling
 ```
 
 The agent loop (`internal/agent/agent.go`) is intentionally simple:
@@ -292,6 +392,10 @@ This relies on Ollama's native OpenAI-compatible tool-calling support in
 format, so a JSON-emission fallback for models without native tool support
 could be added later as an alternate implementation behind the same
 `agent.Agent` interface without touching the CLI or tools layer.
+
+Embeddings are decoupled from Ollama via a small interface in
+`internal/tools` (`Embedder`, satisfied by `*staticembed.Model`), so the
+embedding backend can be swapped without touching the tools or the cache.
 
 Before building the tool registry, `main.go` calls `POST /api/show` once for
 the selected model (`ollama.Client.ShowModel`) and uses the result for two
@@ -323,6 +427,6 @@ in `internal/security` and tool behavior (binary refusal, content/name
 search, stat, directory listing, batch reads, extension/sort filters,
 `read_image`'s vision-capability gating, and `search_semantic`'s ranking,
 embedding cache, and error surfacing) in `internal/tools`. The
-`search_semantic` tests use a small in-memory fake embedder (an `embedder`
-interface satisfied by `*ollama.Client`) so they don't need a real Ollama
-server or model.
+`search_semantic` tests use a small in-memory fake embedder (an `Embedder`
+interface also satisfied by `*staticembed.Model`) so they don't need a real
+embedding model or Ollama server.

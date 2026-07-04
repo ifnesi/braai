@@ -36,6 +36,5 @@ go.work.sum
 
 # Others
 /braai
-.beta/
-beta/
+.test/
 .claude/

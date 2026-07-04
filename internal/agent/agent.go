@@ -35,8 +35,11 @@ using the tools provided. Rules you must follow:
    documents (PDF, Word, Excel, PowerPoint, etc.), use read_document() to
    extract text intelligently, then search_document() to find relevant chunks
    by meaning, and get_chunk() to retrieve full text of specific chunks.
-   search_semantic finds files by meaning rather than exact text but requires
-   embeddings support — if it errors, fall back to search_content.
+   search_semantic searches the whole tree by meaning and returns the most
+   relevant passages (with a path and chunk_index); follow up with
+   get_chunk(path, chunk_index) to read a passage in full. It runs a local
+   in-process embedding model (no server needed). Prefer search_content for
+   exact substrings.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.

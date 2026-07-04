@@ -78,7 +78,7 @@ func TestNormalizeWhitespace(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"hello  world", "hello  world"}, // preserves internal spaces
+		{"hello  world", "hello  world"},     // preserves internal spaces
 		{"hello\n\nworld", "hello\n\nworld"}, // consecutive blanks are consolidated
 		{"  hello  ", "hello"},
 		{"hello\n\n\n\nworld", "hello\n\nworld"},

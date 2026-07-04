@@ -13,25 +13,28 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/chzyer/readline"
 
 	"braai/internal/agent"
+	"braai/internal/cache"
 	"braai/internal/config"
 	"braai/internal/ollama"
 	"braai/internal/security"
+	"braai/internal/staticembed"
 	"braai/internal/terminal"
 	"braai/internal/tools"
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.0.5"
+const version = "0.0.6"
 
-// defaultEmbedModel is used for search_semantic / search_document when neither
-// --embed-model nor settings.embed_model is set.
-const defaultEmbedModel = "nomic-embed-text"
+// defaultEmbedModel is the Hugging Face repo of the static embedding model braai
+// downloads and runs in-process (no Ollama needed for embeddings).
+const defaultEmbedModel = "minishlab/potion-retrieval-32M"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -47,7 +50,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var (
 		ollamaHost    = fs.String("ollama-host", "", "Ollama server base URL (default http://localhost:11434, or ~/.braai/settings.json)")
 		model         = fs.String("model", "", "Ollama model name to use (default: first model available on the server)")
-		embedModel    = fs.String("embed-model", "", "Ollama model to use for embeddings (search_semantic/search_document). Default: nomic-embed-text, or ~/.braai/settings.json")
+		embedModel    = fs.String("embed-model", "", "Hugging Face repo of the static embedding model for semantic search. Default: minishlab/potion-retrieval-32M, or ~/.braai/settings.json")
 		workingDir    = fs.String("working-dir", "", "Root directory the agent may inspect (default: current directory)")
 		prompt        = fs.String("prompt", "", "Single prompt to run non-interactively. If omitted, starts an interactive chat, unless trailing args or stdin provide a prompt.")
 		verbose       = fs.Bool("verbose", false, "Print tool calls and intermediate steps")
@@ -139,6 +142,57 @@ Flags:
 	resolvedEmbedModel := firstNonEmpty(*embedModel, settings.EmbedModel, defaultEmbedModel)
 	settings.EmbedModel = resolvedEmbedModel
 
+	// Resolve semantic-cache options (secure defaults: cache on, compressed,
+	// encrypted, 1 GiB budget). Pointer bools default to true when omitted.
+	cacheText := true
+	if settings.CacheExtractedText != nil {
+		cacheText = *settings.CacheExtractedText
+	}
+	cacheEncrypt := true
+	if settings.CacheEncryption != nil {
+		cacheEncrypt = *settings.CacheEncryption
+	}
+	cacheCompression := settings.CacheCompression
+	if cacheCompression == "" {
+		cacheCompression = "flate"
+	}
+	cacheMaxBytes := settings.CacheMaxBytes
+	if cacheMaxBytes <= 0 {
+		cacheMaxBytes = 1 << 30 // 1 GiB
+	}
+
+	// Load the in-process static embedding model (downloaded from Hugging Face
+	// on first use). Non-fatal: if it fails, chat still works and semantic
+	// search reports a clear "unavailable" error instead of crashing.
+	var embedModelObj *staticembed.Model
+	if modelsDir, mdErr := config.ModelsDir(); mdErr == nil {
+		if dir, dErr := staticembed.EnsureModel(ctx, resolvedEmbedModel, modelsDir); dErr == nil {
+			if m, lErr := staticembed.Load(dir); lErr == nil {
+				embedModelObj = m
+			} else {
+				fmt.Fprintf(stderr, "warning: could not load embedding model %q: %v (semantic search disabled)\n", resolvedEmbedModel, lErr)
+			}
+		} else {
+			fmt.Fprintf(stderr, "warning: could not fetch embedding model %q: %v (semantic search disabled)\n", resolvedEmbedModel, dErr)
+		}
+	}
+
+	var semanticCache *cache.Cache
+	if cacheDir, cerr := config.CacheDir(); cerr == nil {
+		keyPath, _ := config.CacheKeyPath()
+		c, oerr := cache.Open(cacheDir, keyPath, root.Abs(), resolvedEmbedModel, cache.Options{
+			CacheText:   cacheText,
+			Compression: cacheCompression,
+			Encrypt:     cacheEncrypt,
+			MaxBytes:    cacheMaxBytes,
+		})
+		if oerr == nil {
+			semanticCache = c
+		} else if *verbose {
+			fmt.Fprintf(stderr, "warning: semantic cache disabled: %v\n", oerr)
+		}
+	}
+
 	limits := tools.DefaultLimits()
 	limits.MaxReadBytes = *maxReadBytes
 
@@ -151,7 +205,7 @@ Flags:
 		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, resolvedEmbedModel, resolvedMaxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr)
+	session := newChatSession(client, root, limits, settings, resolvedEmbedModel, embedModelObj, resolvedMaxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr, semanticCache)
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
@@ -185,6 +239,7 @@ type chatSession struct {
 	limits        tools.Limits
 	settings      *config.Settings
 	embedModel    string
+	embedder      *staticembed.Model
 	maxToolCalls  int
 	verbose       bool
 	showReasoning bool
@@ -197,15 +252,17 @@ type chatSession struct {
 	modelInfo ollama.ModelInfo
 	ag        *agent.Agent
 	registry  *tools.Registry
+	cache     *cache.Cache
 }
 
-func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, embedModel string, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer) *chatSession {
+func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, embedModel string, embedder *staticembed.Model, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer, semanticCache *cache.Cache) *chatSession {
 	return &chatSession{
 		client:        client,
 		root:          root,
 		limits:        limits,
 		settings:      settings,
 		embedModel:    embedModel,
+		embedder:      embedder,
 		maxToolCalls:  maxToolCalls,
 		verbose:       verbose,
 		showReasoning: showReasoning,
@@ -213,6 +270,7 @@ func newChatSession(client *ollama.Client, root *security.Root, limits tools.Lim
 		stdout:        stdout,
 		colorLevel:    colorLevel,
 		verboseWriter: verboseWriter,
+		cache:         semanticCache,
 	}
 }
 
@@ -225,7 +283,12 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 		fmt.Fprintf(s.verboseWriter, "warning: could not check capabilities for %s, assuming no vision support and no context-length warnings: %v\n", model, err)
 	}
 
-	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), s.client, s.embedModel)
+	var embedClient tools.Embedder
+	if s.embedder != nil {
+		embedClient = s.embedder
+	}
+	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), embedClient, s.embedModel)
+	registry.SetCache(s.cache)
 	ag := agent.New(s.client, registry, agent.Options{
 		Model:         model,
 		MaxToolCalls:  s.maxToolCalls,
@@ -416,11 +479,12 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintln(out, "Commands:")
 		fmt.Fprintf(out, "  %s%s reset the conversation history\n", terminal.Bold(session.colorLevel, "/clear"), strings.Repeat(" ", 18-len("/clear")))
 		fmt.Fprintf(out, "  %s%s erase ~/.braai/chat_history (the up/down recall history)\n", terminal.Bold(session.colorLevel, "/forget-history"), strings.Repeat(" ", 18-len("/forget-history")))
-		fmt.Fprintf(out, "  %s%s list the tools available to the model\n", terminal.Bold(session.colorLevel, "/tools"), strings.Repeat(" ", 18-len("/tools")))
+		fmt.Fprintf(out, "  %s%s list tools available to the model (/tools full for details)\n", terminal.Bold(session.colorLevel, "/tools"), strings.Repeat(" ", 18-len("/tools")))
 		fmt.Fprintf(out, "  %s%s show the current model and list models available on the server\n", terminal.Bold(session.colorLevel, "/model"), strings.Repeat(" ", 18-len("/model")))
 		fmt.Fprintf(out, "  %s%s switch to a different model and save it as the default\n", terminal.Bold(session.colorLevel, "/model <name>"), strings.Repeat(" ", 18-len("/model <name>")))
 		fmt.Fprintf(out, "  %s%s save the conversation transcript to a file\n", terminal.Bold(session.colorLevel, "/save <file>"), strings.Repeat(" ", 18-len("/save <file>")))
 		fmt.Fprintf(out, "  %s%s copy the last answer to clipboard\n", terminal.Bold(session.colorLevel, "/copy"), strings.Repeat(" ", 18-len("/copy")))
+		fmt.Fprintf(out, "  %s%s show or clear the semantic-search cache (/cache clear)\n", terminal.Bold(session.colorLevel, "/cache"), strings.Repeat(" ", 18-len("/cache")))
 		fmt.Fprintf(out, "  %s%s show this message\n", terminal.Bold(session.colorLevel, "/help"), strings.Repeat(" ", 18-len("/help")))
 		fmt.Fprintf(out, "  %s%s leave the chat (Ctrl + d, also works)\n", terminal.Bold(session.colorLevel, "/bye, exit, quit"), strings.Repeat(" ", 18-len("/bye, exit, quit")))
 		return history
@@ -453,9 +517,19 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		return history
 
 	case "/tools":
-		fmt.Fprintln(out, "Available tools:")
-		for _, t := range session.registry.Definitions() {
-			fmt.Fprintf(out, "  %-16s %s\n", t.Function.Name, t.Function.Description)
+		full := len(fields) >= 2 &&
+			(fields[1] == "full" || fields[1] == "-v" || fields[1] == "all")
+		defs := session.registry.Definitions()
+		fmt.Fprintf(out, "Available tools (%d):\n", len(defs))
+		for _, t := range defs {
+			fmt.Fprintf(out, "\n  %s\n", terminal.Bold(session.colorLevel, t.Function.Name))
+			fmt.Fprintf(out, "    %s\n", t.Function.Description)
+			if full {
+				printToolArgs(out, session.colorLevel, t.Function.Parameters)
+			}
+		}
+		if !full {
+			fmt.Fprintln(out, "\nTip: /tools full  also shows each tool's arguments")
 		}
 		return history
 
@@ -527,9 +601,91 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		}
 		return history
 
+	case "/cache":
+		if session.cache == nil {
+			fmt.Fprintln(out, "semantic cache is disabled")
+			return history
+		}
+		if len(fields) >= 2 && fields[1] == "clear" {
+			if err := session.cache.Clear(); err != nil {
+				fmt.Fprintf(out, "could not clear cache: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "semantic cache cleared")
+			}
+			return history
+		}
+		files, chunks, bytes := session.cache.Status()
+		fmt.Fprintf(out, "semantic cache: %d files, %d chunks, %.1f MiB (use /cache clear to wipe)\n",
+			files, chunks, float64(bytes)/(1024*1024))
+		return history
+
 	default:
 		fmt.Fprintf(out, "unknown command %q; try /help\n", cmd)
 		return history
+	}
+}
+
+// printToolArgs renders a tool's JSON-Schema parameters (name, type, required
+// flag, and description) for the `/tools full` listing. It is fully defensive:
+// any missing or unexpectedly-typed schema field is skipped rather than causing
+// a panic, so a malformed tool definition can never crash the REPL.
+func printToolArgs(out io.Writer, colorLevel terminal.Level, params map[string]any) {
+	props, _ := params["properties"].(map[string]any)
+	if len(props) == 0 {
+		fmt.Fprintln(out, "    arguments: (none)")
+		return
+	}
+
+	// Collect the required parameter names (accept []string or []any, since the
+	// schema is []string in code but becomes []any after a JSON round-trip).
+	required := make(map[string]bool)
+	switch req := params["required"].(type) {
+	case []string:
+		for _, name := range req {
+			required[name] = true
+		}
+	case []any:
+		for _, name := range req {
+			if s, ok := name.(string); ok {
+				required[s] = true
+			}
+		}
+	}
+
+	// Sort required arguments first, then alphabetically within each group.
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if required[names[i]] != required[names[j]] {
+			return required[names[i]]
+		}
+		return names[i] < names[j]
+	})
+
+	fmt.Fprintln(out, "    arguments:")
+	for _, name := range names {
+		spec, _ := props[name].(map[string]any)
+		typ, _ := spec["type"].(string)
+		if typ == "" {
+			typ = "any"
+		}
+		if items, ok := spec["items"].(map[string]any); ok {
+			if itemType, ok := items["type"].(string); ok {
+				typ += "[" + itemType + "]"
+			}
+		}
+		reqMark := ""
+		if required[name] {
+			reqMark = " (required)"
+		}
+		desc, _ := spec["description"].(string)
+
+		fmt.Fprintf(out, "      %s %s%s\n", terminal.Bold(colorLevel, name), typ, reqMark)
+		if desc != "" {
+			fmt.Fprintf(out, "          %s\n", desc)
+		}
 	}
 }
 

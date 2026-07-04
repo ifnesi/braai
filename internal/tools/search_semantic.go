@@ -9,15 +9,20 @@ import (
 	"path/filepath"
 	"sort"
 
+	"braai/internal/cache"
 	"braai/internal/ollama"
 )
+
+// maxTotalChunks bounds how many chunks (across all files) one search_semantic
+// call will score, to cap latency/memory on very large trees.
+const maxTotalChunks = 5000
 
 func searchSemanticDefinition() ollama.Tool {
 	return ollama.Tool{
 		Type: "function",
 		Function: ollama.ToolFunction{
 			Name:        "search_semantic",
-			Description: "Search files under the working directory by meaning rather than exact text, using embeddings (e.g. \"find notes about the pricing decision\" without needing the exact words used). Ranks whole files by similarity to the query. Slower than search_content and requires the Ollama server to support embeddings; prefer search_content for exact substrings.",
+			Description: "Search the entire working directory by meaning and return the most relevant passages (with file path and chunk_index), not just whole-file rankings. Embeddings are cached on disk (compressed + encrypted) so repeated searches are fast. After a match, call get_chunk(path, chunk_index) to read the full passage. Prefer search_content for exact substrings.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -27,7 +32,11 @@ func searchSemanticDefinition() ollama.Tool {
 					},
 					"top_k": map[string]any{
 						"type":        "integer",
-						"description": "Maximum number of ranked results to return. Default 10.",
+						"description": "Maximum number of ranked passages to return. Default 10.",
+					},
+					"threshold": map[string]any{
+						"type":        "number",
+						"description": "Minimum similarity score (0-1) to include a passage. Default 0 (return all, ranked).",
 					},
 					"extensions": map[string]any{
 						"type":        "array",
@@ -42,13 +51,15 @@ func searchSemanticDefinition() ollama.Tool {
 }
 
 type semanticMatch struct {
-	Path    string  `json:"path"`
-	Score   float64 `json:"score"`
-	Excerpt string  `json:"excerpt"`
+	Path       string  `json:"path"`
+	ChunkIndex int     `json:"chunk_index"`
+	Section    string  `json:"section,omitempty"`
+	Score      float64 `json:"score"`
+	Excerpt    string  `json:"excerpt"`
 }
 
 func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Result, error) {
-	if r.embedClient == nil {
+	if r.embedClient == nil || r.chunkEmbedder == nil {
 		return Result{}, fmt.Errorf("search_semantic is unavailable: no embedding client configured")
 	}
 
@@ -60,64 +71,153 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 	if topK <= 0 || topK > r.limits.MaxSemanticResults {
 		topK = r.limits.MaxSemanticResults
 	}
+	// Default threshold 0: return all candidates ranked (weak matches included).
+	threshold := 0.0
+	if th, ok := args["threshold"]; ok {
+		if f, ok := th.(float64); ok {
+			threshold = f
+		}
+	}
 	extensions := stringSliceArg(args, "extensions")
 
-	candidates, truncated, err := r.collectSemanticCandidates(extensions)
-	if err != nil {
-		return Result{}, err
-	}
-	if len(candidates) == 0 {
-		return textResult(`{"matches":[],"note":"no eligible text files found"}`), nil
-	}
-
-	if err := r.ensureEmbeddings(ctx, candidates); err != nil {
-		return Result{}, fmt.Errorf("embedding request failed: %w", err)
-	}
-
+	// Embed the query once per call.
 	queryVecs, err := r.embedClient.Embed(ctx, r.embedModel, []string{query})
 	if err != nil {
 		return Result{}, fmt.Errorf("embedding request failed: %w", err)
 	}
+	if len(queryVecs) != 1 {
+		return Result{}, fmt.Errorf("embedding request returned %d vectors for the query", len(queryVecs))
+	}
 	queryVec := normalize(queryVecs[0])
 
-	// Cached vectors are already normalized (see ensureEmbeddings), so
-	// similarity is just a dot product rather than a full cosine similarity
-	// recomputing both norms on every query.
-	matches := make([]semanticMatch, 0, len(candidates))
-	for _, c := range candidates {
-		entry := r.embedCache[c.absPath]
-		matches = append(matches, semanticMatch{
-			Path:    r.root.RelPath(c.absPath),
-			Score:   dot(queryVec, entry.vector),
-			Excerpt: c.excerpt,
-		})
+	paths, filesTruncated, err := r.collectSemanticFiles(extensions)
+	if err != nil {
+		return Result{}, err
 	}
+	if len(paths) == 0 {
+		return textResult(`{"matches":[],"note":"no eligible files found"}`), nil
+	}
+
+	var matches []semanticMatch
+	total := 0
+	chunksTruncated := false
+
+	for _, absPath := range paths {
+		info, statErr := os.Stat(absPath)
+		if statErr != nil {
+			continue
+		}
+		relPath := r.root.RelPath(absPath)
+		mtimeNS := info.ModTime().UnixNano()
+		size := info.Size()
+
+		metas, err := r.semanticChunkMetas(ctx, relPath, absPath, mtimeNS, size)
+		if err != nil {
+			return Result{}, err
+		}
+		if len(metas) == 0 {
+			continue
+		}
+		if total+len(metas) > maxTotalChunks {
+			chunksTruncated = true
+			break
+		}
+		total += len(metas)
+
+		for i := range metas {
+			score := dot(queryVec, normalize(metas[i].Embedding))
+			if score < threshold {
+				continue
+			}
+			matches = append(matches, semanticMatch{
+				Path:       relPath,
+				ChunkIndex: metas[i].Index,
+				Section:    metas[i].Section,
+				Score:      score,
+				Excerpt:    metas[i].Excerpt,
+			})
+		}
+	}
+
 	sort.Slice(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
 	if len(matches) > topK {
 		matches = matches[:topK]
+	}
+	if matches == nil {
+		matches = []semanticMatch{}
+	}
+
+	// Persist any newly computed embeddings/blobs.
+	if r.semanticCache != nil {
+		_ = r.semanticCache.Flush()
 	}
 
 	out, jsonErr := json.MarshalIndent(struct {
 		Matches   []semanticMatch `json:"matches"`
 		Truncated bool            `json:"truncated,omitempty"`
-	}{Matches: matches, Truncated: truncated}, "", "  ")
+	}{Matches: matches, Truncated: filesTruncated || chunksTruncated}, "", "  ")
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}
 	return textResult(string(out)), nil
 }
 
-type semanticCandidate struct {
-	absPath string
-	text    string
-	excerpt string
+// semanticChunkMetas returns the chunk metadata (with normalized embeddings) for
+// one file, preferring the persistent cache, then falling back to extract+embed
+// (which itself uses chunkEmbedder's in-memory cache) and persisting the result.
+func (r *Registry) semanticChunkMetas(ctx context.Context, relPath, absPath string, mtimeNS, size int64) ([]cache.ChunkMeta, error) {
+	if r.semanticCache != nil {
+		if entry, ok := r.semanticCache.Get(relPath, mtimeNS, size); ok {
+			return entry.Chunks, nil
+		}
+	}
+
+	chunks, err := r.extractChunks(absPath)
+	if err != nil {
+		// Unreadable/unsupported file: skip it rather than failing the search.
+		return nil, nil
+	}
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	embedded, err := r.chunkEmbedder.EmbedChunks(ctx, r.embedModel, absPath, chunks)
+	if err != nil {
+		return nil, fmt.Errorf("embedding request failed: %w", err)
+	}
+
+	metas := make([]cache.ChunkMeta, len(embedded))
+	texts := make([]string, len(embedded))
+	for i := range embedded {
+		ch := embedded[i].Chunk
+		metas[i] = cache.ChunkMeta{
+			Index:     ch.Index,
+			Section:   ch.Section,
+			Tokens:    ch.Tokens,
+			Excerpt:   truncateExcerpt(ch.Text, 200),
+			Embedding: normalize(embedded[i].Embedding),
+		}
+		texts[i] = ch.Text
+	}
+
+	if r.semanticCache != nil {
+		entry := &cache.FileEntry{
+			RelPath:   relPath,
+			ModTimeNS: mtimeNS,
+			Size:      size,
+			Chunks:    metas,
+		}
+		_ = r.semanticCache.Put(entry, texts)
+	}
+	return metas, nil
 }
 
-// collectSemanticCandidates walks the root collecting up to MaxSemanticFiles
-// eligible text files (same skip rules as search_content), reading each
-// one's content (truncated to MaxEmbedChars) for embedding.
-func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCandidate, bool, error) {
-	var candidates []semanticCandidate
+// collectSemanticFiles walks the root collecting up to MaxSemanticFiles eligible
+// files (same skip/extension/size rules as the other searches). It does not read
+// file bodies — extraction happens per file in semanticChunkMetas, so PDF/DOCX/
+// etc. are supported, not just plaintext.
+func (r *Registry) collectSemanticFiles(extensions []string) ([]string, bool, error) {
+	var paths []string
 	truncated := false
 
 	walkErr := filepath.WalkDir(r.root.Abs(), func(path string, d os.DirEntry, err error) error {
@@ -133,27 +233,12 @@ func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCan
 		if skipDirNames[d.Name()] || !extensionMatches(d.Name(), extensions) {
 			return nil
 		}
-
 		info, statErr := d.Info()
 		if statErr != nil || info.Size() == 0 || info.Size() > r.limits.MaxSearchFileBytes {
 			return nil
 		}
-
-		// Read once and sniff the bytes already in hand, rather than opening
-		// the file a second time just to check whether it looks like text.
-		data, readErr := os.ReadFile(path)
-		if readErr != nil || !looksLikeTextBytes(data) {
-			return nil
-		}
-		text := string(data)
-		if len(text) > r.limits.MaxEmbedChars {
-			text = text[:r.limits.MaxEmbedChars]
-		}
-
-		excerpt := truncateExcerpt(text, 200)
-
-		candidates = append(candidates, semanticCandidate{absPath: path, text: text, excerpt: excerpt})
-		if len(candidates) >= r.limits.MaxSemanticFiles {
+		paths = append(paths, path)
+		if len(paths) >= r.limits.MaxSemanticFiles {
 			truncated = true
 			return errStopWalk
 		}
@@ -162,63 +247,11 @@ func (r *Registry) collectSemanticCandidates(extensions []string) ([]semanticCan
 	if walkErr != nil && walkErr != errStopWalk {
 		return nil, false, walkErr
 	}
-	return candidates, truncated, nil
+	return paths, truncated, nil
 }
 
-// maxEmbedBatch caps how many texts go into a single Embed HTTP request, so
-// a large uncached candidate set (up to MaxSemanticFiles) doesn't produce
-// one enormous request body that a server or proxy might reject or truncate.
-const maxEmbedBatch = 32
-
-// ensureEmbeddings computes and caches embeddings for any candidates whose
-// file has changed (or was never embedded) since the last call, in batches
-// of maxEmbedBatch. Unchanged files reuse their cached vector, so repeated
-// searches within one braai run only pay the embedding cost once per file.
-func (r *Registry) ensureEmbeddings(ctx context.Context, candidates []semanticCandidate) error {
-	var toEmbed []semanticCandidate
-	var modTimes []int64
-
-	for _, c := range candidates {
-		info, err := os.Stat(c.absPath)
-		if err != nil {
-			continue
-		}
-		mtime := info.ModTime().UnixNano()
-		if cached, ok := r.embedCache[c.absPath]; ok && cached.modTime == mtime {
-			continue
-		}
-		toEmbed = append(toEmbed, c)
-		modTimes = append(modTimes, mtime)
-	}
-
-	for start := 0; start < len(toEmbed); start += maxEmbedBatch {
-		end := start + maxEmbedBatch
-		if end > len(toEmbed) {
-			end = len(toEmbed)
-		}
-		batch := toEmbed[start:end]
-
-		texts := make([]string, len(batch))
-		for i, c := range batch {
-			texts[i] = c.text
-		}
-
-		vectors, err := r.embedClient.Embed(ctx, r.embedModel, texts)
-		if err != nil {
-			return err
-		}
-
-		for i, c := range batch {
-			r.embedCache[c.absPath] = embedCacheEntry{modTime: modTimes[start+i], vector: normalize(vectors[i])}
-		}
-	}
-	return nil
-}
-
-// normalize returns v scaled to unit length, so that a cosine similarity
-// against another normalized vector reduces to a plain dot product — dot
-// is computed once per cached vector here, rather than recomputing both
-// vectors' norms on every single query.
+// normalize returns v scaled to unit length, so cosine similarity against
+// another normalized vector reduces to a plain dot product.
 func normalize(v []float32) []float32 {
 	var sumSq float64
 	for _, x := range v {
@@ -235,10 +268,8 @@ func normalize(v []float32) []float32 {
 	return out
 }
 
-// dot returns the dot product of two equal-length vectors, or 0 if they're
-// empty/mismatched (rather than panicking on a malformed embedding
-// response). When both inputs are unit vectors (see normalize), this is
-// exactly their cosine similarity.
+// dot returns the dot product of two equal-length vectors (0 on mismatch). For
+// unit vectors this equals cosine similarity.
 func dot(a, b []float32) float64 {
 	if len(a) == 0 || len(a) != len(b) {
 		return 0

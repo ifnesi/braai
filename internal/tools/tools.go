@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 
+	"braai/internal/cache"
 	"braai/internal/ollama"
 	"braai/internal/security"
 	"braai/internal/textextract"
@@ -76,10 +77,10 @@ func DefaultLimits() Limits {
 	}
 }
 
-// embedder is the minimal interface search_semantic needs from an Ollama
-// client, kept small so tests can substitute a fake instead of hitting a
-// real server. *ollama.Client satisfies this via its Embed method.
-type embedder interface {
+// Embedder is the minimal interface search_semantic needs from an embedding
+// backend, kept small so different implementations (Ollama, static models, etc.)
+// can be swapped. *ollama.Client and *staticembed.Model satisfy this.
+type Embedder interface {
 	Embed(ctx context.Context, model string, inputs []string) ([][]float32, error)
 }
 
@@ -89,7 +90,7 @@ type Registry struct {
 	limits        Limits
 	visionCapable bool
 
-	embedClient embedder
+	embedClient Embedder
 	embedModel  string
 	// embedCache holds one vector per file path, keyed by path, and is
 	// reused across search_semantic calls within the process's lifetime as
@@ -105,6 +106,11 @@ type Registry struct {
 	// search_document. It is long-lived so its per-document embedding cache
 	// is reused across calls. Nil when no embedding client is configured.
 	chunkEmbedder *textextract.ChunkEmbedder
+
+	// semanticCache is the persistent, encrypted on-disk cache backing
+	// search_semantic and get_chunk. Nil disables persistence (semantic
+	// search still works, re-embedding each run). Set via SetCache.
+	semanticCache *cache.Cache
 }
 
 type embedCacheEntry struct {
@@ -117,22 +123,29 @@ type embedCacheEntry struct {
 // among its capabilities; read_image refuses to run when false rather than
 // silently sending image data a model can't use. embedClient/embedModel are
 // used by search_semantic; embedClient may be nil if the caller has no
-// Ollama client available, in which case search_semantic reports a clear
+// embedding backend available, in which case search_semantic reports a clear
 // error instead of panicking.
-func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient embedder, embedModel string) *Registry {
+func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient Embedder, embedModel string) *Registry {
 	r := &Registry{
-		root:                   root,
-		limits:                 limits,
-		visionCapable:          visionCapable,
-		embedClient:            embedClient,
-		embedModel:             embedModel,
-		embedCache:             make(map[string]embedCacheEntry),
-		documentChunkCache:     make(map[string][]textextract.Chunk),
+		root:               root,
+		limits:             limits,
+		visionCapable:      visionCapable,
+		embedClient:        embedClient,
+		embedModel:         embedModel,
+		embedCache:         make(map[string]embedCacheEntry),
+		documentChunkCache: make(map[string][]textextract.Chunk),
 	}
 	if embedClient != nil {
 		r.chunkEmbedder = textextract.NewChunkEmbedder(embedClient.Embed)
 	}
 	return r
+}
+
+// SetCache attaches a persistent semantic-search cache. Passing nil disables
+// persistence. Kept separate from NewRegistry so existing callers/tests that
+// don't use a cache need no changes.
+func (r *Registry) SetCache(c *cache.Cache) {
+	r.semanticCache = c
 }
 
 // Definitions returns the Ollama tool schemas for all supported tools, in a

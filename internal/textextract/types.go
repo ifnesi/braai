@@ -5,12 +5,12 @@ import "strings"
 // Chunk is a slice of extracted text sized for LLM consumption, with metadata
 // that lets a downstream model localize and cite the content.
 type Chunk struct {
-	Index   int    `json:"index"`    // 1-indexed position in document
-	Total   int    `json:"total"`    // total chunks in this document
-	Source  string `json:"source"`   // filename
+	Index   int    `json:"index"`             // 1-indexed position in document
+	Total   int    `json:"total"`             // total chunks in this document
+	Source  string `json:"source"`            // filename
 	Section string `json:"section,omitempty"` // sheet/slide name, if applicable
-	Tokens  int    `json:"tokens"`   // estimated token count
-	Text    string `json:"text"`     // the actual content
+	Tokens  int    `json:"tokens"`            // estimated token count
+	Text    string `json:"text"`              // the actual content
 }
 
 // ManifestEntry is a compact, model-facing description of one chunk. Send the
@@ -28,8 +28,8 @@ type ManifestEntry struct {
 // ChunkWithEmbedding pairs a chunk with its normalized embedding vector
 // for semantic search.
 type ChunkWithEmbedding struct {
-	Chunk      *Chunk    `json:"chunk"`
-	Embedding  []float32 `json:"embedding,omitempty"` // normalized (magnitude 1)
+	Chunk     *Chunk    `json:"chunk"`
+	Embedding []float32 `json:"embedding,omitempty"` // normalized (magnitude 1)
 }
 
 // RankedChunk represents a chunk and its relevance score for search results.

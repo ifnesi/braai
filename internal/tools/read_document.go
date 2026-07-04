@@ -65,10 +65,10 @@ By default, text is cleaned for LLM consumption (headers/footers/page numbers re
 }
 
 type readDocumentResult struct {
-	Text     string                     `json:"text,omitempty"`      // full text if small
-	Tokens   int                        `json:"tokens,omitempty"`    // token count of the text
-	Manifest []textextract.ManifestEntry `json:"manifest,omitempty"`  // TOC if document too large
-	Cleaned  bool                       `json:"cleaned"`
+	Text     string                      `json:"text,omitempty"`     // full text if small
+	Tokens   int                         `json:"tokens,omitempty"`   // token count of the text
+	Manifest []textextract.ManifestEntry `json:"manifest,omitempty"` // TOC if document too large
+	Cleaned  bool                        `json:"cleaned"`
 }
 
 func (r *Registry) readDocument(args map[string]any) (Result, error) {

@@ -18,7 +18,7 @@ audio transcripts, e.g. `braai --working-dir ~/notes/2026-Q3 "summarize this
 week's meetings and flag any action items"` — see
 [Read-only toolset](#read-only-toolset) for the tools it uses to do that.
 
-![Image](img/braai.png)
+![Image](img/braai.jpg)
 
 ## Requirements
 

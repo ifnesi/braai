@@ -16,7 +16,7 @@ func listDirDefinition() ollama.Tool {
 		Type: "function",
 		Function: ollama.ToolFunction{
 			Name:        "list_dir",
-			Description: "List entries (files and directories) in a directory within the working directory. Does not recurse by default.",
+			Description: "List files and directories within the working directory. Set depth to control recursion (depth 1 = immediate entries only, higher = deeper; use a large depth like 100 to list an entire tree). When the request targets specific file types (e.g. \"the PDF files\", \"markdown notes\"), you MUST pass the extensions filter instead of listing everything and filtering afterwards. Supports sort_by name|modified_time.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -26,12 +26,12 @@ func listDirDefinition() ollama.Tool {
 					},
 					"depth": map[string]any{
 						"type":        "integer",
-						"description": "Recursion depth: 1 lists only the given directory's immediate entries, 2 also lists one level of subdirectories, and so on. Default 1.",
+						"description": "Recursion depth. 1 = only immediate entries (default). Higher values recurse deeper; use a large value (e.g. 100) to list all files under the path recursively.",
 					},
 					"extensions": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "Optional list of file extensions to include, e.g. [\".md\", \".txt\"]. Directories are always listed regardless of this filter so navigation still works. Case-insensitive.",
+						"description": "File extensions to include, e.g. [\".md\", \".txt\"]. Include the leading dot; case-insensitive. ALWAYS set this when the user asks for specific file types (e.g. [\".pdf\"] for \"the PDF files\") so the tool returns only matching files instead of the whole directory. Directories are always listed regardless of this filter so navigation still works.",
 					},
 					"sort_by": map[string]any{
 						"type":        "string",
@@ -129,7 +129,7 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 		sort.SliceStable(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	}
 
-	out, err := json.MarshalIndent(entries, "", "  ")
+	out, err := json.Marshal(entries)
 	if err != nil {
 		return Result{}, err
 	}

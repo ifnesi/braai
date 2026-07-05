@@ -17,7 +17,7 @@ func TestChatStreamReturnsErrorWhenStreamEndsWithoutDone(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL)
+	c := NewClient(srv.URL, 0)
 	_, err := c.ChatStream(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}}, nil)
 	if err == nil {
 		t.Fatal("expected an error for a stream that never sent done:true, got nil")
@@ -32,7 +32,7 @@ func TestChatStreamReturnsFullMessageOnSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL)
+	c := NewClient(srv.URL, 0)
 	resp, err := c.ChatStream(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -52,7 +52,7 @@ func TestChatStreamSurfacesCleanErrorOnNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL)
+	c := NewClient(srv.URL, 0)
 	_, err := c.Embed(context.Background(), "m", []string{"hi"})
 	if err == nil {
 		t.Fatal("expected an error")

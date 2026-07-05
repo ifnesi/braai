@@ -29,7 +29,7 @@ func searchNameDefinition() ollama.Tool {
 					"extensions": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "Optional list of file extensions to restrict matches to, e.g. [\".md\", \".txt\"]. Directories are always eligible regardless of this filter. Case-insensitive.",
+						"description": "File extensions to restrict matches to, e.g. [\".md\", \".txt\"]. Include the leading dot; case-insensitive. ALWAYS set this when the user restricts to specific file types so results are narrowed by the tool rather than after the fact. Directories are always eligible regardless of this filter.",
 					},
 				},
 				"required": []string{"pattern"},
@@ -82,10 +82,10 @@ func (r *Registry) searchName(args map[string]any) (Result, error) {
 	}
 
 	truncated := len(matches) >= r.limits.MaxNameResults
-	out, jsonErr := json.MarshalIndent(struct {
+	out, jsonErr := json.Marshal(struct {
 		Matches   []string `json:"matches"`
 		Truncated bool     `json:"truncated,omitempty"`
-	}{Matches: matches, Truncated: truncated}, "", "  ")
+	}{Matches: matches, Truncated: truncated})
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}

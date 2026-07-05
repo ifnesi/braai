@@ -215,6 +215,7 @@ cache_max_bytes=0
 Core settings:
 
 - `ollama_host` — URL of your Ollama server (default: `http://localhost:11434`)
+- `ollama_timeout` — HTTP request timeout in seconds for Ollama calls (default: `300`, i.e. 5 minutes)
 - `model` — Default chat model (auto-detected from first available if omitted)
 - `embed_model` — Hugging Face repo of the static embedding model used for
   semantic search (default: `minishlab/potion-retrieval-32M`). This is **not**
@@ -321,10 +322,11 @@ Invocation:
 The agent can only call the tools below, all confined to `--working-dir`. Use
 `/tools full` inside the chat to see each tool's exact arguments.
 
-- **list_dir** — list entries in a directory. Supports recursion depth, an
-  `extensions` filter (e.g. only `.md`/`.txt`), and `sort_by: modified_time`
-  to surface the most recently changed files first (handy for "find this
-  week's meeting notes").
+- **list_dir** — list entries in a directory, with optional recursion. Use
+  `depth=1` (default) for immediate entries only, or a large depth like 100
+  to list an entire tree recursively. Supports an `extensions` filter (e.g.
+  only `.md`/`.txt`) and `sort_by: modified_time` to surface the most recently
+  changed files first (handy for "find this week's meeting notes").
 - **read_file** — read a text file, with optional line ranges and a
   configurable max-bytes truncation. Refuses binary files.
 - **read_files** — read several text files in a single call (e.g. a batch of
@@ -361,9 +363,6 @@ The agent can only call the tools below, all confined to `--working-dir`. Use
   `search_document`, or `search_semantic` first to get chunk indices, then use
   this to retrieve a chunk's full text by its 1-indexed number. When the cache
   has the document's text, this is served from disk without re-extraction.
-- **find_all_files** — recursively list all files under a directory. Returns
-  a compact JSON list of file paths. Useful for exploring large directory
-  structures and discovering files without iterating with `list_dir`.
 - **stat_file** — metadata: type, size, modification time, permissions,
   extension.
 - **read_image** — read a PNG/JPG/JPEG/GIF/WEBP and attach it to the

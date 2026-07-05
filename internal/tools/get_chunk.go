@@ -76,7 +76,7 @@ func (r *Registry) getChunk(args map[string]any) (Result, error) {
 					},
 					Text: cc.Text,
 				}
-				jsonOut, _ := json.MarshalIndent(out, "", "  ")
+				jsonOut, _ := json.Marshal(out)
 				return textResult(string(jsonOut)), nil
 			}
 		}
@@ -99,7 +99,7 @@ func (r *Registry) getChunk(args map[string]any) (Result, error) {
 	for _, chunk := range chunks {
 		if chunk.Index == chunkIndex {
 			out := getChunkResult{Chunk: chunk, Text: chunk.Text}
-			jsonOut, _ := json.MarshalIndent(out, "", "  ")
+			jsonOut, _ := json.Marshal(out)
 			return textResult(string(jsonOut)), nil
 		}
 	}

@@ -23,10 +23,14 @@ type Client struct {
 }
 
 // NewClient creates a client pointed at baseURL (e.g. http://localhost:11434).
-func NewClient(baseURL string) *Client {
+// timeout is in seconds; 0 defaults to 5 minutes (300 seconds).
+func NewClient(baseURL string, timeout int) *Client {
+	if timeout <= 0 {
+		timeout = 300
+	}
 	return &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: 5 * time.Minute},
+		http:    &http.Client{Timeout: time.Duration(timeout) * time.Second},
 	}
 }
 

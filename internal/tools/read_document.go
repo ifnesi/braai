@@ -120,7 +120,7 @@ func (r *Registry) readDocument(args map[string]any) (Result, error) {
 			Tokens:  tokens,
 			Cleaned: clean,
 		}
-		jsonOut, _ := json.MarshalIndent(out, "", "  ")
+		jsonOut, _ := json.Marshal(out)
 		return textResult(string(jsonOut)), nil
 	}
 
@@ -136,6 +136,6 @@ func (r *Registry) readDocument(args map[string]any) (Result, error) {
 		Manifest: manifest,
 		Cleaned:  clean,
 	}
-	jsonOut, _ := json.MarshalIndent(out, "", "  ")
+	jsonOut, _ := json.Marshal(out)
 	return textResult(string(jsonOut)), nil
 }

@@ -29,9 +29,9 @@ using the tools provided. Rules you must follow:
    read_files over multiple individual read_file calls.
 4. Stay within the fixed toolset you are given: list_dir, read_file,
    read_files, read_document, search_name, search_content, search_document,
-   search_semantic, stat_file, get_chunk, find_all_files, and (only on
-   vision-capable models) read_image. For discovering files in unknown
-   directories, use find_all_files(path) to see the full file tree. For
+   search_semantic, stat_file, get_chunk, and (only on vision-capable
+   models) read_image. For discovering files in unknown directories, use
+   list_dir(path, depth=100) to see the full file tree. For
    documents (PDF, Word, Excel, PowerPoint, etc.), use read_document() to
    extract text intelligently, then search_document() to find relevant chunks
    by meaning, and get_chunk() to retrieve full text of specific chunks.
@@ -113,10 +113,10 @@ func SystemMessage() ollama.Message {
 // exposed so callers (e.g. --output json) can report exactly what evidence
 // the model gathered, not just its final answer.
 type ToolCallRecord struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments,omitempty"`
-	Result    string         `json:"result,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	Name      string          `json:"name"`
+	Arguments map[string]any  `json:"arguments,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 // RunResult is everything a single Run call produced.
@@ -216,7 +216,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 				a.logToolCall(tc, result, callErr)
 			}
 			content := result.Text
-			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: result.Text}
+			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: json.RawMessage(result.Text)}
 			if callErr != nil {
 				content = fmt.Sprintf("error: %v", callErr)
 				record.Error = callErr.Error()

@@ -110,7 +110,7 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 			Results: []textextract.RankedChunk{},
 			Count:   0,
 		}
-		jsonOut, _ := json.MarshalIndent(out, "", "  ")
+		jsonOut, _ := json.Marshal(out)
 		return textResult(string(jsonOut)), nil
 	}
 
@@ -129,6 +129,6 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 		Results: ranked,
 		Count:   len(ranked),
 	}
-	jsonOut, _ := json.MarshalIndent(out, "", "  ")
+	jsonOut, _ := json.Marshal(out)
 	return textResult(string(jsonOut)), nil
 }

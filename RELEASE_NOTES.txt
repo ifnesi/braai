@@ -12,6 +12,27 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.1.1] - 2026-07-05
+--------------------
+
+Added
+  - New `ollama_timeout` setting (default: 300 seconds / 5 minutes) to configure
+    HTTP request timeout for Ollama calls. Useful for slow networks or models
+    that need more time to process requests. Configurable in ~/.braai/braai.conf.
+
+Changed
+  - Tool output now uses compact JSON (single-line, no indentation) to save
+    tokens. Users can pipe to `jq` for pretty-printing: `braai --output json
+    "..." | jq .`
+  - Consolidated file enumeration: removed find_all_files tool. Use list_dir
+    with a large depth (e.g. depth=100) to list entire directory trees
+    recursively. This reduces tool-choice ambiguity for the model.
+
+Removed
+  - find_all_files tool. Equivalent functionality now available via
+    list_dir(path, depth=100) for recursive enumeration of entire trees.
+
+
 [0.1.0] - 2026-07-04
 --------------------
 

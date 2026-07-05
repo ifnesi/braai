@@ -17,6 +17,7 @@ type Settings struct {
 	EmbedModel         string
 	MaxToolCalls       int
 	HistoryLimit       int
+	OllamaTimeout      int // seconds; 0 = default 300 (5 minutes)
 	CacheExtractedText *bool
 	CacheCompression   string
 	CacheEncryption    *bool
@@ -149,6 +150,10 @@ func Load() (*Settings, error) {
 			if n, err := strconv.Atoi(val); err == nil {
 				s.MaxToolCalls = n
 			}
+		case "ollama_timeout":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.OllamaTimeout = n
+			}
 		case "history_limit":
 			if n, err := strconv.Atoi(val); err == nil {
 				s.HistoryLimit = n
@@ -195,6 +200,9 @@ func Save(s *Settings) error {
 	}
 	if s.MaxToolCalls > 0 {
 		add("max_tool_calls", strconv.Itoa(s.MaxToolCalls))
+	}
+	if s.OllamaTimeout > 0 {
+		add("ollama_timeout", strconv.Itoa(s.OllamaTimeout))
 	}
 	add("history_limit", strconv.Itoa(s.HistoryLimit))
 	if s.CacheExtractedText != nil {
@@ -283,6 +291,12 @@ func ApplyDefaults(s *Settings) bool {
 	// HistoryLimit: default 100
 	if s.HistoryLimit == 0 {
 		s.HistoryLimit = 100
+		modified = true
+	}
+
+	// OllamaTimeout: default 300 seconds (5 minutes)
+	if s.OllamaTimeout == 0 {
+		s.OllamaTimeout = 300
 		modified = true
 	}
 

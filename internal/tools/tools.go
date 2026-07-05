@@ -162,7 +162,6 @@ func (r *Registry) Definitions() []ollama.Tool {
 		searchSemanticDefinition(),
 		statFileDefinition(),
 		getChunkDefinition(),
-		findAllFilesDefinition(),
 	}
 	if r.visionCapable {
 		defs = append(defs, readImageDefinition())
@@ -198,8 +197,6 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return r.statFile(args)
 	case "get_chunk":
 		return r.getChunk(args)
-	case "find_all_files":
-		return r.findAllFiles(args)
 	default:
 		return Result{}, unknownToolError(name)
 	}

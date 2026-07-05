@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.1.0"
+const version = "0.1.1"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -121,7 +121,7 @@ Flags:
 		return fmt.Errorf("invalid working directory: %w", err)
 	}
 
-	client := ollama.NewClient(host)
+	client := ollama.NewClient(host, settings.OllamaTimeout)
 
 	ctx := context.Background()
 	selectedModel, err := resolveModel(ctx, client, *model, settings)
@@ -366,11 +366,11 @@ func runOnce(ctx context.Context, ag *agent.Agent, prompt string, stdout io.Writ
 	return nil
 }
 
-// printJSONResult encodes an agent.RunResult as a single indented JSON
-// object (answer, reasoning if any, and the tool calls used to produce it).
+// printJSONResult encodes an agent.RunResult as a single compact JSON
+// object on one line (answer, reasoning if any, and the tool calls used).
+// Users can pipe to jq for pretty-printing: | jq .
 func printJSONResult(w io.Writer, result agent.RunResult) error {
 	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
 	return enc.Encode(result)
 }
 

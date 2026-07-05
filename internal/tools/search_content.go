@@ -93,11 +93,11 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 	}
 
 	truncated := len(matches) >= r.limits.MaxSearchResults
-	out, jsonErr := json.MarshalIndent(struct {
+	out, jsonErr := json.Marshal(struct {
 		Matches      []contentMatch `json:"matches"`
 		FilesScanned int            `json:"files_scanned"`
 		Truncated    bool           `json:"truncated,omitempty"`
-	}{Matches: matches, FilesScanned: filesScanned, Truncated: truncated}, "", "  ")
+	}{Matches: matches, FilesScanned: filesScanned, Truncated: truncated})
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}

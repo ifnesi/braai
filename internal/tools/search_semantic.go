@@ -152,10 +152,10 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 		_ = r.semanticCache.Flush()
 	}
 
-	out, jsonErr := json.MarshalIndent(struct {
+	out, jsonErr := json.Marshal(struct {
 		Matches   []semanticMatch `json:"matches"`
 		Truncated bool            `json:"truncated,omitempty"`
-	}{Matches: matches, Truncated: filesTruncated || chunksTruncated}, "", "  ")
+	}{Matches: matches, Truncated: filesTruncated || chunksTruncated})
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}

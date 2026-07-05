@@ -75,7 +75,7 @@ func (r *Registry) statFile(args map[string]any) (Result, error) {
 		result.Extension = filepath.Ext(absPath)
 	}
 
-	out, jsonErr := json.MarshalIndent(result, "", "  ")
+	out, jsonErr := json.Marshal(result)
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}

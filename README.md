@@ -178,69 +178,81 @@ subsequent runs can reuse them as defaults. Command-line flags always take
 precedence over this file, and values you set by hand in the file are preserved
 (they aren't clobbered by runtime defaults).
 
-Example `~/.braai/braai.conf`:
+Example `~/.braai/braai.conf` (generated on first run with all defaults and helpful comments):
 
 ```conf
 # braai configuration
-# Key=value format. Lines starting with # are comments.
+# key=value; lines starting with # are comments. Command-line flags override these.
 
-# Ollama API host
+# ── Core ─────────────────────────────────────────────────────────────────────
 ollama_host=http://localhost:11434
-
-# Default chat model
-model=gemma4:12b-mlx
-
-# Default embedding model (Hugging Face repo)
+model=
 embed_model=minishlab/potion-retrieval-32M
-
-# Maximum tool calls per request
 max_tool_calls=100
+ollama_timeout=300
 
-# Maximum number of recall history entries
+# ── Ollama runtime (blank/0 = use server defaults) ───────────────────────────
+num_ctx=0
+keep_alive=
+
+# ── Chat recall history ──────────────────────────────────────────────────────
 history_limit=100
 
-# Cache extracted text from documents (true/false)
+# ── Semantic-search cache ────────────────────────────────────────────────────
 cache_extracted_text=true
-
-# Cache compression method (flate or none)
 cache_compression=flate
-
-# Encrypt cache at rest (true/false)
 cache_encryption=true
+cache_max_bytes=1073741824
 
-# Total cache size in bytes (0 = 1 GiB default)
-cache_max_bytes=0
+# ── Tool limits (0 = use built-in default) ───────────────────────────────────
+max_read_bytes=-1
+max_search_file_bytes=2097152
+max_search_results=200
+max_name_results=500
+max_batch_files=20
+max_image_bytes=10485760
+max_semantic_files=200
+max_semantic_results=10
+max_embed_chars=8000
+max_document_bytes=131072
 ```
 
-Core settings:
+**Core settings:**
 
 - `ollama_host` — URL of your Ollama server (default: `http://localhost:11434`)
-- `ollama_timeout` — HTTP request timeout in seconds for Ollama calls (default: `300`, i.e. 5 minutes)
-- `model` — Default chat model (auto-detected from first available if omitted)
-- `embed_model` — Hugging Face repo of the static embedding model used for
-  semantic search (default: `minishlab/potion-retrieval-32M`). This is **not**
-  an Ollama model — it's a model2vec static-embedding repo that braai downloads
-  to `~/.braai/models/` and runs in-process. Other options include
-  `minishlab/potion-multilingual-128M` (multilingual). Changing this transparently
-  rebuilds the semantic cache, since embeddings from different models aren't
-  comparable.
-- `max_tool_calls` — Max tool invocations per response before aborting (default: `100`)
-- `history_limit` — Max number of chat history entries kept for up/down arrow recall
-  (default: `100`)
+- `model` — Default chat model (auto-detected from first available if blank)
+- `embed_model` — Hugging Face repo of the static embedding model (default: `minishlab/potion-retrieval-32M`). This is **not** an Ollama model — it's a model2vec repo that braai downloads and runs in-process.
+- `max_tool_calls` — Max tool calls per response (default: `100`)
+- `ollama_timeout` — HTTP timeout in seconds for Ollama calls (default: `300` / 5 min)
 
-Semantic-cache settings (all optional; secure defaults apply when omitted):
+**Ollama runtime (blank/0 = server defaults):**
 
-- `cache_extracted_text` — Persist extracted document text to disk so `get_chunk`
-  is instant and doesn't re-extract (default: `true`). Set to `false` for a
-  privacy-first mode: only embeddings/metadata are cached, and document text is
-  re-extracted on demand — no document text is ever written to disk.
-- `cache_compression` — `flate` (default) or `none`. Compresses cached text blobs.
-- `cache_encryption` — Encrypt cached text blobs at rest with AES-256-GCM
-  (default: `true`). The key is a machine-local file at `~/.braai/cache.key`
-  (see [Security model](#security-model)).
-- `cache_max_bytes` — Total on-disk budget for cached blobs before least-recently-used
-  eviction kicks in (default: `0`, i.e. 1 GiB). Set to `0` to use the default; any
-  positive value caps the cache size.
+- `num_ctx` — Context window in tokens. Raise (e.g. `16384`) if long tool results get truncated
+- `keep_alive` — How long to keep the model loaded between calls (e.g. `30m` or `-1` for forever). Blank = Ollama default.
+
+**Chat recall history:**
+
+- `history_limit` — Entries kept for up/down-arrow recall (default: `100`)
+
+**Semantic-cache settings:**
+
+- `cache_extracted_text` — Persist document text for instant `get_chunk` (default: `true`). Set `false` for privacy: only embeddings cached, text re-extracted on demand.
+- `cache_compression` — `flate` (default) or `none`
+- `cache_encryption` — Encrypt cache blobs at rest with AES-256-GCM (default: `true`). Key stored at `~/.braai/cache.key`.
+- `cache_max_bytes` — Total cache budget before LRU eviction (default: `1073741824` / 1 GiB)
+
+**Tool limits (0 = built-in default):**
+
+- `max_read_bytes` — Max bytes for single text file (default: `-1` / unlimited)
+- `max_search_file_bytes` — Max file size to scan (default: `2097152` / 2 MiB)
+- `max_search_results` — Results from exact search (default: `200`)
+- `max_name_results` — Results from name filter (default: `500`)
+- `max_batch_files` — Files in one batch read (default: `20`)
+- `max_image_bytes` — Max image size (default: `10485760` / 10 MiB)
+- `max_semantic_files` — Files in whole-tree semantic search (default: `200`)
+- `max_semantic_results` — Results from semantic search (default: `10`)
+- `max_embed_chars` — Characters embedded per file (default: `8000`)
+- `max_document_bytes` — Extracted text per document in batch read (default: `131072` / 128 KiB)
 
 ### Custom prompt-template commands
 
@@ -324,45 +336,25 @@ The agent can only call the tools below, all confined to `--working-dir`. Use
 
 - **list_dir** — list entries in a directory, with optional recursion. Use
   `depth=1` (default) for immediate entries only, or a large depth like 100
-  to list an entire tree recursively. Supports an `extensions` filter (e.g.
-  only `.md`/`.txt`) and `sort_by: modified_time` to surface the most recently
-  changed files first (handy for "find this week's meeting notes").
-- **read_file** — read a text file, with optional line ranges and a
-  configurable max-bytes truncation. Refuses binary files.
-- **read_files** — read several text files in a single call (e.g. a batch of
-  meeting notes to summarize together), instead of one `read_file` call per
-  file. Capped at 20 files per call; per-file errors are reported inline
-  without failing the whole batch.
-- **search_name** — case-insensitive (by default) substring search over file
-  and directory names, with an optional `extensions` filter.
-- **search_content** — plain-text search over file contents, returning file
-  path, line number, and a short excerpt per match. Skips binary and
-  oversized files.
-- **search_semantic** — search the **entire working directory by meaning** and
-  return the most relevant *passages* (not just whole files), each with a file
-  path and a `chunk_index`. The model then calls `get_chunk(path, chunk_index)`
-  to read a matching passage in full. Every eligible file is extracted, chunked,
-  and embedded with the in-process static model; chunks are ranked by cosine
-  similarity to the query. Results and embeddings are persisted in an on-disk
-  cache (see [Semantic search & caching](#semantic-search--caching)), so repeated
-  searches — and searches in later sessions — are near-instant for unchanged
-  files. Prefer `search_content` for known exact substrings.
-- **read_document** — extract and optionally chunk text from documents (PDF,
-  Word, Excel, PowerPoint, HTML, CSV, JSON, RTF, plaintext, etc.). If text
-  is small (≤ 2000 tokens), returns it directly; if larger, returns a
-  manifest of chunks that can be fetched individually with `get_chunk`.
-  Supports `clean=true` to remove headers/footers/page numbers (default), or
-  `clean=false` for raw text.
-- **search_document** — semantically search *within a single document* to find
-  relevant chunks (e.g., "find the authentication requirements chapter").
-  Returns the top matching chunks ranked by semantic similarity, using the
-  same in-process static embeddings as `search_semantic` but scoped to one file.
-  Useful for large documents like manuals or specs.
+  to list an entire tree recursively. Supports:
+  - `extensions` filter (e.g. only `.md`/`.txt`)
+  - `name_contains` to find entries whose name matches a substring (case-insensitive)
+  - `sort_by: modified_time` to surface the most recently changed files first
+- **read** — read file contents with transparent document handling:
+  - Plain text and code files are returned directly with optional line ranges.
+  - Documents (PDF, Word, Excel, PowerPoint, HTML, RTF) have their text extracted automatically.
+  - Read one file with `path`, or several files at once with `paths`. For a single large document, a manifest of chunks is returned instead of the full text; use `get_chunk(path, chunk_index)` to read a chunk.
+  - Per-file errors are reported inline without failing the batch.
+  - Capped at 20 files per batch call.
+- **search** — search files with flexible dispatch between exact and semantic modes:
+  - **Exact mode** (`semantic=false`, default): fast plain-text substring match over file contents. Returns file path, line number, and excerpt per match. Skips binary and oversized files.
+  - **Semantic mode** (`semantic=true`): search the **entire working directory by meaning** and return the most relevant *passages* (not just whole files), each with a file path and a `chunk_index`. The model then calls `get_chunk(path, chunk_index)` to read a matching passage in full. Every eligible file is extracted, chunked, and embedded with the in-process static model; chunks are ranked by cosine similarity to the query. Results and embeddings are persisted in an on-disk cache (see [Semantic search & caching](#semantic-search--caching)), so repeated searches are near-instant for unchanged files.
+  - Scoped semantic search: use `path` parameter with `semantic=true` to search within a single document (e.g., "find the authentication requirements chapter").
 - **get_chunk** — fetch the full text of a specific chunk after reading or
-  searching a document (or after `search_semantic`). Call `read_document`,
-  `search_document`, or `search_semantic` first to get chunk indices, then use
-  this to retrieve a chunk's full text by its 1-indexed number. When the cache
-  has the document's text, this is served from disk without re-extraction.
+  searching a document (or after `search` with `semantic=true`). Call `read`,
+  `search`, or related tools first to get chunk indices, then use this to retrieve
+  a chunk's full text by its 1-indexed number. When the cache has the document's
+  text, this is served from disk without re-extraction.
 - **stat_file** — metadata: type, size, modification time, permissions,
   extension.
 - **read_image** — read a PNG/JPG/JPEG/GIF/WEBP and attach it to the
@@ -386,7 +378,7 @@ usability (see `internal/tools/tools.go`).
 
 Semantic search is designed to be fast, reliable, and privacy-conscious.
 
-**In-process embeddings.** `search_semantic` and `search_document` use a
+**In-process embeddings.** `search` with `semantic=true` uses a
 [model2vec](https://github.com/MinishLab/model2vec) static embedding model that
 braai loads and runs itself. Static embeddings are a token→vector lookup plus
 mean-pool plus L2-normalize — no neural forward pass, no server, microseconds
@@ -395,11 +387,11 @@ are downloaded once from Hugging Face into `~/.braai/models/<repo>/` and reused
 thereafter. Ollama is not involved in embeddings at all, so semantic search
 keeps working even with Ollama stopped.
 
-**Passage-level results.** Rather than ranking whole files, `search_semantic`
-chunks each file and ranks chunks across the whole tree, returning `path` +
-`chunk_index` + a similarity score + a short excerpt. This tells the model both
-*which file* and *where in it* the match is; it then fetches the full passage
-with `get_chunk`.
+**Passage-level results.** Rather than ranking whole files, semantic search
+chunks each file and ranks chunks across the whole tree (or within a single
+document if a `path` is specified), returning `path` + `chunk_index` + a
+similarity score + a short excerpt. This tells the model both *which file* and
+*where in it* the match is; it then fetches the full passage with `get_chunk`.
 
 **Persistent, compressed, encrypted cache.** Embeddings and chunk metadata are
 stored per project directory under `~/.braai/cache/`, keyed by each file's

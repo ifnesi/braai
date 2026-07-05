@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.1.1"
+const version = "0.1.2"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -201,8 +201,23 @@ Flags:
 		}
 	}
 
-	limits := tools.DefaultLimits()
-	limits.MaxReadBytes = *maxReadBytes
+	// Build tool limits from persisted settings (defaulted by ApplyDefaults).
+	limits := tools.Limits{
+		MaxReadBytes:       settings.MaxReadBytes,
+		MaxSearchFileBytes: settings.MaxSearchFileBytes,
+		MaxSearchResults:   settings.MaxSearchResults,
+		MaxNameResults:     settings.MaxNameResults,
+		MaxBatchFiles:      settings.MaxBatchFiles,
+		MaxImageBytes:      settings.MaxImageBytes,
+		MaxSemanticFiles:   settings.MaxSemanticFiles,
+		MaxSemanticResults: settings.MaxSemanticResults,
+		MaxEmbedChars:      settings.MaxEmbedChars,
+		MaxDocumentBytes:   settings.MaxDocumentBytes,
+	}
+	// CLI flag still wins for read bytes when explicitly provided.
+	if *maxReadBytes != -1 {
+		limits.MaxReadBytes = *maxReadBytes
+	}
 
 	// In JSON mode, output is buffered and printed once as a single object
 	// rather than streamed, so the agent's streaming writer is discarded.
@@ -249,6 +264,8 @@ type chatSession struct {
 	embedModel    string
 	embedder      *staticembed.Model
 	maxToolCalls  int
+	numCtx        int
+	keepAlive     string
 	verbose       bool
 	showReasoning bool
 	stdout        io.Writer
@@ -273,6 +290,8 @@ func newChatSession(client *ollama.Client, root *security.Root, limits tools.Lim
 		embedModel:    embedModel,
 		embedder:      embedder,
 		maxToolCalls:  maxToolCalls,
+		numCtx:        settings.NumCtx,
+		keepAlive:     settings.KeepAlive,
 		verbose:       verbose,
 		showReasoning: showReasoning,
 		workingDir:    workingDir,
@@ -307,6 +326,8 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 		Stdout:        s.stdout,
 		ColorLevel:    s.colorLevel,
 		ContextLength: info.ContextLength,
+		NumCtx:        s.numCtx,
+		KeepAlive:     s.keepAlive,
 	})
 
 	s.model = model

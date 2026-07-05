@@ -27,19 +27,19 @@ using the tools provided. Rules you must follow:
    you already have enough information. When you already know which several
    files you need (e.g. summarizing a batch of meeting notes), prefer
    read_files over multiple individual read_file calls.
-4. Stay within the fixed toolset you are given: list_dir, read_file,
-   read_files, read_document, search_name, search_content, search_document,
-   search_semantic, stat_file, get_chunk, and (only on vision-capable
-   models) read_image. For discovering files in unknown directories, use
-   list_dir(path, depth=100) to see the full file tree. For
-   documents (PDF, Word, Excel, PowerPoint, etc.), use read_document() to
-   extract text intelligently, then search_document() to find relevant chunks
-   by meaning, and get_chunk() to retrieve full text of specific chunks.
-   search_semantic searches the whole tree by meaning and returns the most
-   relevant passages (with a path and chunk_index); follow up with
-   get_chunk(path, chunk_index) to read a passage in full. It runs a local
-   in-process embedding model (no server needed). Prefer search_content for
-   exact substrings.
+4. Stay within the fixed toolset you are given: list_dir, read, search,
+   stat_file, get_chunk, and (only on vision-capable models) read_image.
+   - list_dir(path, depth, extensions, name_contains): enumerate files; use
+     depth=100 to see a whole tree, extensions to filter by type, and
+     name_contains to find files whose name contains a word.
+   - read(path | paths, start_line, end_line): read one or many files; text
+     and documents (PDF/Word/Excel/PowerPoint/HTML/RTF) are handled
+     automatically. A very large single document returns a chunk manifest;
+     use get_chunk(path, chunk_index) to read a chunk.
+   - search(query, semantic, path, ...): semantic=false is a fast exact
+     substring match (with line numbers); semantic=true matches by meaning
+     and returns passages with chunk_index (read them with get_chunk); set
+     path to restrict a semantic search to one document.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.
@@ -76,6 +76,12 @@ type Options struct {
 	// VerboseWriter if the conversation looks likely to approach or exceed
 	// it. Zero disables the check (e.g. when the server didn't report one).
 	ContextLength int
+	// NumCtx, when > 0, sets Ollama's num_ctx (context window in tokens) for
+	// this run. Zero leaves the server default.
+	NumCtx int
+	// KeepAlive, when non-empty, is passed to Ollama to control how long the
+	// model stays resident between calls (e.g. "30m").
+	KeepAlive string
 }
 
 // Agent drives the chat/tool-calling loop for one conversation.
@@ -138,6 +144,12 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 	toolDefs := a.registry.Definitions()
 	var toolCalls []ToolCallRecord
 
+	// Per-turn cache of tool results: an identical (name+args) call within the
+	// same Run returns the prior result instead of re-executing, cutting the
+	// "re-verify / re-read" loops some models fall into. Safe because tools are
+	// read-only and idempotent within a turn.
+	toolResultCache := map[string]tools.Result{}
+
 	// Ask Ollama explicitly either way (not just omit the field when hiding)
 	// so a model that defaults to always reasoning is actually told not to
 	// bother computing it when the user asked to hide it.
@@ -173,10 +185,12 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.ColorLevel, a.opts.Spinner)
 
 		resp, err := a.client.ChatStream(ctx, ollama.ChatRequest{
-			Model:    a.opts.Model,
-			Messages: history,
-			Tools:    toolDefs,
-			Think:    think,
+			Model:     a.opts.Model,
+			Messages:  history,
+			Tools:     toolDefs,
+			Think:     think,
+			Options:   a.chatOptions(),
+			KeepAlive: a.opts.KeepAlive,
 		}, streamer.onChunk)
 		if err != nil {
 			return RunResult{History: history}, fmt.Errorf("ollama chat request failed: %w", err)
@@ -202,7 +216,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		}
 
 		if a.opts.Verbose {
-			fmt.Fprintf(a.opts.VerboseWriter, "[model requested %d tool call(s)]\n", len(resp.Message.ToolCalls))
+			fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Yellow(a.opts.ColorLevel, fmt.Sprintf("[model requested %d tool call(s)]", len(resp.Message.ToolCalls))))
 		}
 
 		if i == a.opts.MaxToolCalls {
@@ -211,9 +225,22 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		}
 
 		for _, tc := range resp.Message.ToolCalls {
-			result, callErr := a.executeTool(ctx, tc)
-			if a.opts.Verbose {
-				a.logToolCall(tc, result, callErr)
+			key := toolCallKey(tc)
+			var result tools.Result
+			var callErr error
+			if cached, ok := toolResultCache[key]; ok {
+				result = cached
+				if a.opts.Verbose {
+					fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Yellow(a.opts.ColorLevel, fmt.Sprintf("  -> %s(...) [cached, skipped re-execution]", tc.Function.Name)))
+				}
+			} else {
+				result, callErr = a.executeTool(ctx, tc)
+				if callErr == nil {
+					toolResultCache[key] = result
+				}
+				if a.opts.Verbose {
+					a.logToolCall(tc, result, callErr)
+				}
 			}
 			content := result.Text
 			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: json.RawMessage(result.Text)}
@@ -278,11 +305,28 @@ func (a *Agent) executeTool(ctx context.Context, tc ollama.ToolCall) (tools.Resu
 	return a.registry.Call(ctx, tc.Function.Name, tc.Function.Arguments)
 }
 
+// chatOptions builds the Ollama options map for this run (currently just
+// num_ctx). Returns nil when nothing is set so server defaults apply.
+func (a *Agent) chatOptions() map[string]any {
+	if a.opts.NumCtx > 0 {
+		return map[string]any{"num_ctx": a.opts.NumCtx}
+	}
+	return nil
+}
+
+// toolCallKey returns a stable dedup key for a tool call (name + canonical
+// JSON of its arguments). json.Marshal sorts map keys, so equal argument sets
+// produce equal keys regardless of field order.
+func toolCallKey(tc ollama.ToolCall) string {
+	argsJSON, _ := json.Marshal(tc.Function.Arguments)
+	return tc.Function.Name + "\x00" + string(argsJSON)
+}
+
 func (a *Agent) logToolCall(tc ollama.ToolCall, result tools.Result, err error) {
 	argsJSON, _ := json.Marshal(tc.Function.Arguments)
-	fmt.Fprintf(a.opts.VerboseWriter, "  -> %s(%s)\n", tc.Function.Name, string(argsJSON))
+	fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Yellow(a.opts.ColorLevel, fmt.Sprintf("  -> %s(%s)", tc.Function.Name, string(argsJSON))))
 	if err != nil {
-		fmt.Fprintf(a.opts.VerboseWriter, "     error: %v\n", err)
+		fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Red(a.opts.ColorLevel, fmt.Sprintf("     error: %v", err)))
 		return
 	}
 	preview := result.Text

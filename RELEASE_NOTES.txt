@@ -12,6 +12,77 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.1.2] - 2026-07-05
+---------------------
+
+Fixed
+  - Cap batch-read document text (major): read() with many large PDFs no longer
+    floods the model context. Each extracted document in a batch is truncated to
+    128 KiB (configurable: max_document_bytes in braai.conf) with a note directing
+    users to read the file alone for the full chunked manifest.
+  - Empty path in semantic search (minor): search(semantic=true, path="") now
+    correctly routes to whole-tree semantic search instead of erroring.
+
+Added
+  - Per-turn tool-call deduplication (efficiency): identical tool calls within a
+    single turn are cached and re-executed results reused, preventing models from
+    re-verifying/re-reading the same data. Verbose mode shows "[cached, skipped
+    re-execution]" in yellow for deduplicated calls.
+  - Color verbose output (feature): tool calls now print in yellow; errors in red.
+    Improves visual distinction when debugging with --verbose.
+  - Configurable Ollama runtime options:
+    - `num_ctx`: set context window in tokens (e.g. 16384) to prevent truncation
+      of long tool results. Default: 0 (Ollama default).
+    - `keep_alive`: keep the model loaded between calls (e.g. "30m" or "-1").
+      Default: "" (Ollama default). Avoids reload latency.
+  - Comprehensive ~/.braai/braai.conf template: first run now generates a
+    fully-annotated config file with all tunable tool limits and their defaults,
+    organized into logical sections (Core, Ollama runtime, Chat recall, Semantic
+    cache, Tool limits). Users can easily find and edit any setting.
+  - All tool limits now persisted in braai.conf with sensible defaults:
+    - max_read_bytes: -1 (unlimited for single files)
+    - max_search_file_bytes: 2 MiB
+    - max_search_results: 200 (exact search)
+    - max_name_results: 500 (list_dir name_contains)
+    - max_batch_files: 20 (read batch size)
+    - max_image_bytes: 10 MiB
+    - max_semantic_files: 200 (whole-tree search scope)
+    - max_semantic_results: 10 (passages returned)
+    - max_embed_chars: 8,000 (embedding token limit)
+    - max_document_bytes: 128 KiB (batch read truncation)
+
+Changed
+  - Consolidated read tools: `read_file`, `read_files`, and `read_document` are
+    now a single `read` tool that intelligently dispatches based on arguments
+    and file type. Single text files support line ranges; documents (PDF/Office/
+    HTML/RTF) are extracted automatically; `paths` array reads multiple files in
+    one call. The get_chunk workflow for large documents is preserved. Reduces
+    tool-choice ambiguity for the model.
+  - Consolidated search tools: `search_content`, `search_semantic`, and
+    `search_document` are now a single `search` tool with a `semantic` flag and
+    optional `path` parameter. Exact (fast) substring search is the default
+    (semantic=false); set semantic=true for meaning-based search. Scope to a
+    single document with the path parameter. Maintains backward-compatible
+    behavior and all existing output formats.
+  - Folded `search_name` into `list_dir`: added a `name_contains` parameter
+    (case-insensitive substring filter) to list_dir. Recursive name search is
+    now just list_dir(path, depth=100, name_contains="pattern").
+  - Updated system prompt to document the consolidated 6-tool set (was 13 tools).
+
+Removed
+  - `search_name`, `read_file`, `read_files`, `read_document`, `search_content`,
+    `search_semantic`, `search_document` are no longer advertised to the model.
+    Their functionality is unified in `read` and `search`, or integrated into
+    `list_dir`. (Internal routes preserved for backward compatibility.)
+
+Notes
+  - The unified tools + dedup + context capping + config tuning reduce both
+    tool-selection ambiguity AND context overflow, making braai significantly
+    more reliable on long conversations with repeated queries.
+  - All changes are backward compatible: old internal routes and methods remain
+    unchanged. Only the public Definitions() list reflects the merges.
+
+
 [0.1.1] - 2026-07-05
 --------------------
 

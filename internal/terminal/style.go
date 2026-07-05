@@ -5,12 +5,13 @@ import "strings"
 // ANSI SGR escape sequences used throughout the package.
 // Only applied when Level >= Basic.
 const (
-	ansiBold  = "\x1b[1m"
-	ansiDim   = "\x1b[2m"
-	ansiRed   = "\x1b[31m"
-	ansiGreen = "\x1b[32m"
-	ansiCyan  = "\x1b[36m"
-	ansiReset = "\x1b[0m"
+	ansiBold   = "\x1b[1m"
+	ansiDim    = "\x1b[2m"
+	ansiRed    = "\x1b[31m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiCyan   = "\x1b[36m"
+	ansiReset  = "\x1b[0m"
 )
 
 // Bold wraps s with bold SGR codes when lv >= Basic, otherwise returns s as-is.
@@ -51,6 +52,14 @@ func Cyan(lv Level, s string) string {
 		return s
 	}
 	return ansiCyan + s + ansiReset
+}
+
+// Yellow wraps s with yellow foreground SGR codes when lv >= Basic.
+func Yellow(lv Level, s string) string {
+	if lv == None {
+		return s
+	}
+	return ansiYellow + s + ansiReset
 }
 
 // DimOpen returns the raw open-dim escape when lv >= Basic (empty string

@@ -81,6 +81,12 @@ type ChatRequest struct {
 	// Message.Thinking) on models that support it. Omitted entirely when nil
 	// so models without thinking support are unaffected.
 	Think *bool `json:"think,omitempty"`
+	// Options carries Ollama runtime options (e.g. {"num_ctx": 16384}). Omitted
+	// when empty so server defaults apply.
+	Options map[string]any `json:"options,omitempty"`
+	// KeepAlive controls how long the model stays loaded after the request
+	// (e.g. "30m", "-1" to keep indefinitely). Omitted when empty.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // ChatResponse is the body returned by POST /api/chat, one per streamed line

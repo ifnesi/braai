@@ -18,10 +18,25 @@ type Settings struct {
 	MaxToolCalls       int
 	HistoryLimit       int
 	OllamaTimeout      int // seconds; 0 = default 300 (5 minutes)
+	NumCtx             int
+	KeepAlive          string
 	CacheExtractedText *bool
 	CacheCompression   string
 	CacheEncryption    *bool
 	CacheMaxBytes      int64
+
+	// Tool limits (0 = use built-in default; see ApplyDefaults). Persisted so
+	// users can tune them in braai.conf.
+	MaxReadBytes       int
+	MaxSearchFileBytes int64
+	MaxSearchResults   int
+	MaxNameResults     int
+	MaxBatchFiles      int
+	MaxImageBytes      int64
+	MaxSemanticFiles   int
+	MaxSemanticResults int
+	MaxEmbedChars      int
+	MaxDocumentBytes   int
 }
 
 // Dir returns the ~/.braai directory, creating it if necessary with owner-only (0700)
@@ -158,6 +173,52 @@ func Load() (*Settings, error) {
 			if n, err := strconv.Atoi(val); err == nil {
 				s.HistoryLimit = n
 			}
+		case "num_ctx":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.NumCtx = n
+			}
+		case "keep_alive":
+			s.KeepAlive = val
+		case "max_read_bytes":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxReadBytes = n
+			}
+		case "max_search_file_bytes":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				s.MaxSearchFileBytes = n
+			}
+		case "max_search_results":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxSearchResults = n
+			}
+		case "max_name_results":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxNameResults = n
+			}
+		case "max_batch_files":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxBatchFiles = n
+			}
+		case "max_image_bytes":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				s.MaxImageBytes = n
+			}
+		case "max_semantic_files":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxSemanticFiles = n
+			}
+		case "max_semantic_results":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxSemanticResults = n
+			}
+		case "max_embed_chars":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxEmbedChars = n
+			}
+		case "max_document_bytes":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.MaxDocumentBytes = n
+			}
 		case "cache_extracted_text":
 			b := parseBool(val)
 			s.CacheExtractedText = &b
@@ -205,6 +266,12 @@ func Save(s *Settings) error {
 		add("ollama_timeout", strconv.Itoa(s.OllamaTimeout))
 	}
 	add("history_limit", strconv.Itoa(s.HistoryLimit))
+	if s.NumCtx > 0 {
+		add("num_ctx", strconv.Itoa(s.NumCtx))
+	}
+	if s.KeepAlive != "" {
+		add("keep_alive", s.KeepAlive)
+	}
 	if s.CacheExtractedText != nil {
 		add("cache_extracted_text", fmt.Sprintf("%v", *s.CacheExtractedText))
 	}
@@ -215,6 +282,22 @@ func Save(s *Settings) error {
 		add("cache_encryption", fmt.Sprintf("%v", *s.CacheEncryption))
 	}
 	add("cache_max_bytes", strconv.FormatInt(s.CacheMaxBytes, 10))
+	add("max_read_bytes", strconv.Itoa(s.MaxReadBytes))
+	add("max_search_file_bytes", strconv.FormatInt(s.MaxSearchFileBytes, 10))
+	add("max_search_results", strconv.Itoa(s.MaxSearchResults))
+	add("max_name_results", strconv.Itoa(s.MaxNameResults))
+	add("max_batch_files", strconv.Itoa(s.MaxBatchFiles))
+	add("max_image_bytes", strconv.FormatInt(s.MaxImageBytes, 10))
+	add("max_semantic_files", strconv.Itoa(s.MaxSemanticFiles))
+	add("max_semantic_results", strconv.Itoa(s.MaxSemanticResults))
+	add("max_embed_chars", strconv.Itoa(s.MaxEmbedChars))
+	add("max_document_bytes", strconv.Itoa(s.MaxDocumentBytes))
+	if s.NumCtx > 0 {
+		add("num_ctx", strconv.Itoa(s.NumCtx))
+	}
+	if s.KeepAlive != "" {
+		add("keep_alive", s.KeepAlive)
+	}
 
 	want := make(map[string]string, len(desired))
 	for _, d := range desired {
@@ -241,7 +324,92 @@ func Save(s *Settings) error {
 			}
 		}
 	} else {
-		out = append(out, "# braai configuration", "# key=value; lines starting with # are comments", "")
+		// New file: write a comprehensive template with all tunable limits and explanations.
+		template := []string{
+			"# braai configuration",
+			"# key=value; lines starting with # are comments. Command-line flags override these.",
+			"",
+			"# ── Core ─────────────────────────────────────────────────────────────────────",
+			"# URL of your local Ollama server (used for the chat model only).",
+			"ollama_host=http://localhost:11434",
+			"",
+			"# Default chat model. Auto-detected from the first available model if blank.",
+			"model=",
+			"",
+			"# Hugging Face repo of the static embedding model braai downloads and runs",
+			"# in-process for semantic search (NOT an Ollama model). No server needed.",
+			"embed_model=minishlab/potion-retrieval-32M",
+			"",
+			"# Max tool calls the model may make per request before braai aborts the turn.",
+			"max_tool_calls=100",
+			"",
+			"# How long braai waits for one Ollama request, in seconds. Covers a full",
+			"# streamed turn (thinking + tokens). 0/blank = default 300 (5 minutes).",
+			"# Raise this (e.g. 1200) for long-running summary commands.",
+			"ollama_timeout=300",
+			"",
+			"# ── Ollama runtime (blank/0 = use server defaults) ───────────────────────────",
+			"# Context window in tokens. Raise (e.g. 16384) if long tool results get",
+			"# truncated and the model \"forgets\" and re-fetches. 0 = Ollama default.",
+			"num_ctx=0",
+			"",
+			"# How long Ollama keeps the model loaded between calls, e.g. 30m or -1 (forever).",
+			"# Blank = Ollama default. Keeping it resident avoids reload latency per call.",
+			"keep_alive=",
+			"",
+			"# ── Chat recall history ──────────────────────────────────────────────────────",
+			"# Number of past prompts kept for up/down-arrow recall (encrypted at rest).",
+			"history_limit=100",
+			"",
+			"# ── Semantic-search cache (encrypted at rest with ~/.braai/cache.key) ────────",
+			"# Persist extracted document text to disk so get_chunk is instant. false = a",
+			"# privacy-first mode: only embeddings/metadata cached, text re-extracted on demand.",
+			"cache_extracted_text=true",
+			"",
+			"# Compression for cached text blobs: flate or none.",
+			"cache_compression=flate",
+			"",
+			"# Encrypt cached text blobs at rest (AES-256-GCM). Strongly recommended.",
+			"cache_encryption=true",
+			"",
+			"# Total on-disk budget for cache blobs before least-recently-used eviction.",
+			"# 1073741824 = 1 GiB. Use -1 for unbounded.",
+			"cache_max_bytes=1073741824",
+			"",
+			"# ── Tool limits (0 = use built-in default) ───────────────────────────────────",
+			"# Max bytes read() returns for a single text file. -1 = unlimited.",
+			"max_read_bytes=-1",
+			"",
+			"# Max size of a file that search/content will scan. 2097152 = 2 MiB.",
+			"max_search_file_bytes=2097152",
+			"",
+			"# Max results returned by an exact (non-semantic) search.",
+			"max_search_results=200",
+			"",
+			"# Max results returned when filtering entries by name (list_dir name_contains).",
+			"max_name_results=500",
+			"",
+			"# Max number of files read() will accept in one batch (paths=[...]).",
+			"max_batch_files=20",
+			"",
+			"# Max size of an image read_image will load. 10485760 = 10 MiB.",
+			"max_image_bytes=10485760",
+			"",
+			"# Max number of files scanned in a whole-tree semantic search.",
+			"max_semantic_files=200",
+			"",
+			"# Max passages returned by a semantic search.",
+			"max_semantic_results=10",
+			"",
+			"# Max characters embedded per file/query for semantic search.",
+			"max_embed_chars=8000",
+			"",
+			"# Max extracted text (bytes) per document when read() batches many docs, so a",
+			"# multi-PDF read can't flood the model context. 131072 = 128 KiB.",
+			"max_document_bytes=131072",
+			"",
+		}
+		out = append(out, template...)
 	}
 
 	// Append any managed keys that weren't already present (stable order).
@@ -306,6 +474,49 @@ func ApplyDefaults(s *Settings) bool {
 		s.CacheMaxBytes = 1 << 30 // 1 GiB
 		modified = true
 	}
+
+	// Tool limits: 0 means unset. max_read_bytes uses -1 (unlimited) as default.
+	if s.MaxReadBytes == 0 {
+		s.MaxReadBytes = -1
+		modified = true
+	}
+	if s.MaxSearchFileBytes == 0 {
+		s.MaxSearchFileBytes = 2 * 1024 * 1024
+		modified = true
+	}
+	if s.MaxSearchResults == 0 {
+		s.MaxSearchResults = 200
+		modified = true
+	}
+	if s.MaxNameResults == 0 {
+		s.MaxNameResults = 500
+		modified = true
+	}
+	if s.MaxBatchFiles == 0 {
+		s.MaxBatchFiles = 20
+		modified = true
+	}
+	if s.MaxImageBytes == 0 {
+		s.MaxImageBytes = 10 * 1024 * 1024
+		modified = true
+	}
+	if s.MaxSemanticFiles == 0 {
+		s.MaxSemanticFiles = 200
+		modified = true
+	}
+	if s.MaxSemanticResults == 0 {
+		s.MaxSemanticResults = 10
+		modified = true
+	}
+	if s.MaxEmbedChars == 0 {
+		s.MaxEmbedChars = 8000
+		modified = true
+	}
+	if s.MaxDocumentBytes == 0 {
+		s.MaxDocumentBytes = 131072
+		modified = true
+	}
+	// NumCtx (0) and KeepAlive ("") intentionally left as "server default".
 
 	return modified
 }

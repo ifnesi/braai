@@ -16,7 +16,7 @@ func listDirDefinition() ollama.Tool {
 		Type: "function",
 		Function: ollama.ToolFunction{
 			Name:        "list_dir",
-			Description: "List files and directories within the working directory. Set depth to control recursion (depth 1 = immediate entries only, higher = deeper; use a large depth like 100 to list an entire tree). When the request targets specific file types (e.g. \"the PDF files\", \"markdown notes\"), you MUST pass the extensions filter instead of listing everything and filtering afterwards. Supports sort_by name|modified_time.",
+			Description: "List files and directories within the working directory. Set depth to control recursion (depth 1 = immediate entries only, higher = deeper; use a large depth like 100 to list an entire tree). When the request targets specific file types (e.g. \"the PDF files\", \"markdown notes\"), you MUST pass the extensions filter instead of listing everything and filtering afterwards. To find entries whose name contains a word (e.g. \"files named budget\"), set name_contains and use a large depth to search recursively. Supports sort_by name|modified_time.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -32,6 +32,10 @@ func listDirDefinition() ollama.Tool {
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
 						"description": "File extensions to include, e.g. [\".md\", \".txt\"]. Include the leading dot; case-insensitive. ALWAYS set this when the user asks for specific file types (e.g. [\".pdf\"] for \"the PDF files\") so the tool returns only matching files instead of the whole directory. Directories are always listed regardless of this filter so navigation still works.",
+					},
+					"name_contains": map[string]any{
+						"type":        "string",
+						"description": "Only include entries whose name contains this substring (case-insensitive). Applies to both files and directories. Use with a large depth to find matching files anywhere under the path.",
 					},
 					"sort_by": map[string]any{
 						"type":        "string",
@@ -64,6 +68,7 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 		depth = 1
 	}
 	extensions := stringSliceArg(args, "extensions")
+	nameContains := optionalStringArg(args, "name_contains", "")
 	sortBy := optionalStringArg(args, "sort_by", "name")
 
 	absPath, err := r.root.Resolve(relPath)
@@ -106,6 +111,9 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 			}
 		}
 		if entryType != "dir" && !extensionMatches(d.Name(), extensions) {
+			return nil
+		}
+		if nameContains != "" && !strings.Contains(strings.ToLower(d.Name()), strings.ToLower(nameContains)) {
 			return nil
 		}
 		entries = append(entries, dirEntryInfo{

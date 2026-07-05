@@ -1,7 +1,6 @@
 // Package tools implements the fixed, read-only filesystem toolset the agent
-// may call: list_dir, read_file, read_files, read_image, search_name,
-// search_content, search_semantic, stat_file. All tools are confined to a
-// security.Root and never write to disk.
+// may call: list_dir, read, search, read_image, stat_file, get_chunk.
+// All tools are confined to a security.Root and never write to disk.
 package tools
 
 import (
@@ -39,24 +38,27 @@ func textResult(s string) Result {
 
 // Registry limits controlled at construction time.
 type Limits struct {
-	// MaxReadBytes caps bytes returned by read_file/read_files. -1 means unlimited.
+	// MaxReadBytes caps bytes returned by read. -1 means unlimited.
 	MaxReadBytes int
-	// MaxSearchFileBytes caps how many bytes of a single file search_content or
-	// search_semantic will read.
+	// MaxSearchFileBytes caps how many bytes of a single file search will read.
 	MaxSearchFileBytes int64
-	// MaxSearchResults caps the number of matches search_content returns.
+	// MaxSearchResults caps the number of matches search returns (exact mode).
 	MaxSearchResults int
-	// MaxNameResults caps the number of matches search_name returns.
+	// MaxNameResults is deprecated (search_name folded into list_dir); kept for compat.
+	// list_dir with name_contains has no result cap.
 	MaxNameResults int
-	// MaxBatchFiles caps how many files a single read_files call may read.
+	// MaxBatchFiles caps how many files a single read call with paths may read.
 	MaxBatchFiles int
+	// MaxDocumentBytes caps extracted text per document in a batch read
+	// (readAnyText). 0 = a built-in default is used.
+	MaxDocumentBytes int
 	// MaxImageBytes caps the on-disk size of an image read_image will accept,
 	// since the whole file is base64-encoded and sent to the model.
 	MaxImageBytes int64
-	// MaxSemanticFiles caps how many files a single search_semantic call will
+	// MaxSemanticFiles caps how many files a single search call (semantic mode) will
 	// embed and compare, to bound cost/latency on large trees.
 	MaxSemanticFiles int
-	// MaxSemanticResults caps how many ranked matches search_semantic returns.
+	// MaxSemanticResults caps how many ranked matches search returns (semantic mode).
 	MaxSemanticResults int
 	// MaxEmbedChars caps how much of a file's text is sent for embedding.
 	MaxEmbedChars int
@@ -70,6 +72,7 @@ func DefaultLimits() Limits {
 		MaxSearchResults:   200,
 		MaxNameResults:     500,
 		MaxBatchFiles:      20,
+		MaxDocumentBytes:   131072,           // 128 KiB of extracted text per doc in a batch
 		MaxImageBytes:      10 * 1024 * 1024, // 10MB
 		MaxSemanticFiles:   200,
 		MaxSemanticResults: 10,
@@ -153,13 +156,8 @@ func (r *Registry) SetCache(c *cache.Cache) {
 func (r *Registry) Definitions() []ollama.Tool {
 	defs := []ollama.Tool{
 		listDirDefinition(),
-		readFileDefinition(),
-		readFilesDefinition(),
-		readDocumentDefinition(),
-		searchNameDefinition(),
-		searchContentDefinition(),
-		searchDocumentDefinition(),
-		searchSemanticDefinition(),
+		readDefinition(),
+		searchDefinition(),
 		statFileDefinition(),
 		getChunkDefinition(),
 	}
@@ -177,6 +175,8 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 	switch name {
 	case "list_dir":
 		return r.listDir(args)
+	case "read":
+		return r.read(args)
 	case "read_file":
 		return r.readFile(args)
 	case "read_files":
@@ -187,6 +187,8 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return r.readImage(args)
 	case "search_name":
 		return r.searchName(args)
+	case "search":
+		return r.search(ctx, args)
 	case "search_content":
 		return r.searchContent(args)
 	case "search_document":

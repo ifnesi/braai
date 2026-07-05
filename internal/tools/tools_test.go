@@ -328,16 +328,16 @@ func TestDefinitionsIncludeReadImageWithVision(t *testing.T) {
 	}
 }
 
-func TestDefinitionsAlwaysIncludeSearchSemantic(t *testing.T) {
+func TestDefinitionsAlwaysIncludeSearch(t *testing.T) {
 	r := setupRegistry(t, false)
 	found := false
 	for _, d := range r.Definitions() {
-		if d.Function.Name == "search_semantic" {
+		if d.Function.Name == "search" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected search_semantic to always be advertised")
+		t.Fatal("expected search to always be advertised")
 	}
 }
 

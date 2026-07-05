@@ -64,12 +64,7 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 		return Result{}, err
 	}
 
-	topK := 5
-	if tk, ok := args["top_k"]; ok {
-		if tkInt, ok := tk.(float64); ok {
-			topK = int(tkInt)
-		}
-	}
+	topK := optionalIntArg(args, "top_k", 5)
 	if topK > 10 {
 		topK = 10
 	}
@@ -79,7 +74,7 @@ func (r *Registry) searchDocument(ctx context.Context, args map[string]any) (Res
 
 	threshold := float32(0.3)
 	if th, ok := args["threshold"]; ok {
-		if thFloat, ok := th.(float64); ok {
+		if thFloat, ok := coerceFloat(th); ok {
 			threshold = float32(thFloat)
 		}
 	}

@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.1.2"
+const version = "0.1.3"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -199,6 +199,12 @@ Flags:
 		} else if *verbose {
 			fmt.Fprintf(stderr, "warning: semantic cache disabled: %v\n", oerr)
 		}
+	}
+
+	// Persist the cache index (embeddings + LRU bookkeeping) once on exit, not
+	// only after a search_semantic call.
+	if semanticCache != nil {
+		defer func() { _ = semanticCache.Flush() }()
 	}
 
 	// Build tool limits from persisted settings (defaulted by ApplyDefaults).
@@ -392,6 +398,7 @@ func runOnce(ctx context.Context, ag *agent.Agent, prompt string, stdout io.Writ
 // Users can pipe to jq for pretty-printing: | jq .
 func printJSONResult(w io.Writer, result agent.RunResult) error {
 	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false) // keep <, >, & readable in code/HTML answers
 	return enc.Encode(result)
 }
 

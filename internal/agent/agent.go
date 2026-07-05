@@ -221,6 +221,12 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 
 		if i == a.opts.MaxToolCalls {
 			// Model wants to keep calling tools but we've hit the guardrail.
+			// Drop the trailing assistant turn that requested tools we won't
+			// service, so the returned history has no unmatched tool_calls
+			// (which would make the next Ollama request invalid).
+			if n := len(history); n > 0 && len(history[n-1].ToolCalls) > 0 {
+				history = history[:n-1]
+			}
 			return RunResult{ToolCalls: toolCalls, History: history}, fmt.Errorf("reached max tool calls (%d) without a final answer", a.opts.MaxToolCalls)
 		}
 
@@ -243,7 +249,7 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 				}
 			}
 			content := result.Text
-			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: json.RawMessage(result.Text)}
+			record := ToolCallRecord{Name: tc.Function.Name, Arguments: tc.Function.Arguments, Result: toResultJSON(result.Text)}
 			if callErr != nil {
 				content = fmt.Sprintf("error: %v", callErr)
 				record.Error = callErr.Error()
@@ -312,6 +318,25 @@ func (a *Agent) chatOptions() map[string]any {
 		return map[string]any{"num_ctx": a.opts.NumCtx}
 	}
 	return nil
+}
+
+// toResultJSON returns a tool's textual output as embeddable JSON. Search/list
+// tools already emit JSON, which is passed through untouched; read tools emit
+// plain text, which is encoded as a JSON string so the overall RunResult stays
+// valid JSON for --output json. Without this, json.RawMessage(plainText) makes
+// json.Marshal fail on the very common "read a text file" path.
+func toResultJSON(s string) json.RawMessage {
+	if s == "" {
+		return json.RawMessage(`""`)
+	}
+	if json.Valid([]byte(s)) {
+		return json.RawMessage(s)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return b
 }
 
 // toolCallKey returns a stable dedup key for a tool call (name + canonical

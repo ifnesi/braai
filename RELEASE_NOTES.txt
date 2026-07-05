@@ -12,6 +12,36 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.1.3] - 2026-07-05
+---------------------
+
+Security
+  - Pin embedding model download to revision constant: model.safetensors,
+    tokenizer.json are now pulled from a pinned hfRevision constant (currently
+    "main") rather than hard-coded "/resolve/main/". Prepare for supply-chain
+    hardening by pinning to an immutable commit SHA.
+  - Consolidate crypto code: migrate cache.go to use shared crypt.LoadOrCreateKey
+    and crypt.WriteFileSecure instead of byte-identical duplicates. Prevents
+    AES-256-GCM key handling from drifting between cache and history.
+  - Harden symlink validation for non-existent paths: non-existent target paths
+    now validate that their parent directory isn't a symlink escaping the root.
+    Closes the edge case where a symlink directory inside root pointing outside,
+    combined with a non-existent child, could bypass containment.
+
+Fixed
+  - Lenient tool-argument coercion: tool arguments now accept numeric strings
+    (e.g. "3" instead of 3.0) and boolean strings (e.g. "true", "yes", "1")
+    from smaller local models that emit JSON differently. Silent degradation
+    to defaults is replaced with robust coercion across all argument sites
+    (max_tokens, threshold, top_k, clean, etc.).
+  - Inline code styling now spans stream chunks: backtick spans split across
+    streamed deltas are buffered and merged so inline code at chunk boundaries
+    is styled correctly (bold applied to both open and close backticks).
+  - Config read errors are now reported: if braai.conf is unreadable (e.g.
+    permission denied), a one-line warning is printed to stderr before
+    degrading gracefully to defaults.
+
+
 [0.1.2] - 2026-07-05
 ---------------------
 

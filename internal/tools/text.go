@@ -26,18 +26,13 @@ func looksLikeTextBytes(data []byte) bool {
 // without a second open() syscall.
 func looksLikeTextFile(f *os.File) (bool, error) {
 	buf := make([]byte, sniffLen)
-	// io.ReadAtLeast (rather than a single Read) guards against the
-	// documented possibility of Read returning fewer bytes than requested
-	// even when more are available; ErrUnexpectedEOF/EOF just mean the file
-	// is shorter than sniffLen, which is fine for sniffing.
-	n, err := io.ReadAtLeast(f, buf, 1)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return true, nil // empty file: treat as text
-		}
-		if !errors.Is(err, io.ErrUnexpectedEOF) {
-			return false, err
-		}
+	// io.ReadFull fills buf (up to sniffLen) so the NUL check inspects the whole
+	// sniff window; a short first Read no longer ends the sniff early. EOF (empty
+	// file) and ErrUnexpectedEOF (file shorter than sniffLen) just mean n<sniffLen,
+	// which is fine.
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, err
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return false, err

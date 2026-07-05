@@ -31,6 +31,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"braai/internal/crypt"
 )
 
 // schemaVersion is bumped whenever the on-disk index/blob layout or the chunking
@@ -128,7 +130,7 @@ func Open(baseCacheDir, keyPath, projectRoot, modelTag string, opts Options) (*C
 
 	var key []byte
 	if opts.Encrypt {
-		k, err := loadOrCreateKey(keyPath)
+		k, err := crypt.LoadOrCreateKey(keyPath)
 		if err != nil {
 			return nil, fmt.Errorf("cache key: %w", err)
 		}
@@ -182,7 +184,7 @@ func (c *Cache) Put(entry *FileEntry, chunkTexts []string) error {
 		sealed, err := c.seal(buf.Bytes())
 		if err == nil {
 			name := hashName(entry.RelPath) + ".blob"
-			if werr := writeFileSecure(filepath.Join(c.dir, name), sealed); werr == nil {
+			if werr := crypt.WriteFileSecure(filepath.Join(c.dir, name), sealed); werr == nil {
 				entry.BlobName = name
 				entry.BlobSize = int64(len(sealed))
 			}
@@ -279,7 +281,7 @@ func (c *Cache) flushLocked() error {
 		return err
 	}
 	tmp := c.indexPath + ".tmp"
-	if err := writeFileSecure(tmp, sealed); err != nil {
+	if err := crypt.WriteFileSecure(tmp, sealed); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, c.indexPath); err != nil {
@@ -461,31 +463,4 @@ func mkdirSecure(dir string) error {
 		return err
 	}
 	return os.Chmod(dir, 0o700)
-}
-
-// writeFileSecure writes data and forces 0600 regardless of umask.
-func writeFileSecure(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
-}
-
-// loadOrCreateKey returns the 32-byte key at path, generating it (0600) on first
-// use. A wrong-sized existing file is treated as absent and regenerated.
-func loadOrCreateKey(path string) ([]byte, error) {
-	if b, err := os.ReadFile(path); err == nil && len(b) == 32 {
-		return b, nil
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	if err := writeFileSecure(path, key); err != nil {
-		return nil, err
-	}
-	return key, nil
 }

@@ -138,7 +138,9 @@ func Load() (*Settings, error) {
 		return &Settings{}, nil
 	}
 	if err != nil {
-		return &Settings{}, nil // unreadable: ignore and use defaults
+		// Warn to stderr about the unreadable config and degrade to defaults.
+		fmt.Fprintf(os.Stderr, "warning: unable to read config at %s: %v (using defaults)\n", path, err)
+		return &Settings{}, nil
 	}
 
 	s := &Settings{}
@@ -292,12 +294,6 @@ func Save(s *Settings) error {
 	add("max_semantic_results", strconv.Itoa(s.MaxSemanticResults))
 	add("max_embed_chars", strconv.Itoa(s.MaxEmbedChars))
 	add("max_document_bytes", strconv.Itoa(s.MaxDocumentBytes))
-	if s.NumCtx > 0 {
-		add("num_ctx", strconv.Itoa(s.NumCtx))
-	}
-	if s.KeepAlive != "" {
-		add("keep_alive", s.KeepAlive)
-	}
 
 	want := make(map[string]string, len(desired))
 	for _, d := range desired {
@@ -412,10 +408,12 @@ func Save(s *Settings) error {
 		out = append(out, template...)
 	}
 
-	// Append any managed keys that weren't already present (stable order).
+	// Append any managed keys that weren't already present (stable order),
+	// marking each as seen so a duplicate entry in `desired` isn't written twice.
 	for _, d := range desired {
 		if !seen[d.k] {
 			out = append(out, d.k+"="+d.v)
+			seen[d.k] = true
 		}
 	}
 

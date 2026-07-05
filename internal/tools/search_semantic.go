@@ -74,7 +74,7 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 	// Default threshold 0: return all candidates ranked (weak matches included).
 	threshold := 0.0
 	if th, ok := args["threshold"]; ok {
-		if f, ok := th.(float64); ok {
+		if f, ok := coerceFloat(th); ok {
 			threshold = f
 		}
 	}

@@ -86,7 +86,16 @@ func (r *Root) Resolve(relPath string) (string, error) {
 	}
 
 	// Path does not exist yet (fine for read-only tools that will just error
-	// later with "not found"); still validate parent containment.
+	// later with "not found"), but validate that the parent directory doesn't
+	// escape via symlink. E.g., a symlink dir inside the root pointing outside
+	// combined with a non-existent child could escape the containment.
+	if parent := filepath.Dir(cleaned); parent != cleaned {
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			if !r.within(resolved) {
+				return "", fmt.Errorf("path escapes working directory via symlink: %s", relPath)
+			}
+		}
+	}
 	return cleaned, nil
 }
 

@@ -82,19 +82,8 @@ func (r *Registry) readDocument(args map[string]any) (Result, error) {
 		return Result{}, err
 	}
 
-	maxTokens := 2000
-	if mt, ok := args["max_tokens"]; ok {
-		if mtInt, ok := mt.(float64); ok {
-			maxTokens = int(mtInt)
-		}
-	}
-
-	clean := true
-	if c, ok := args["clean"]; ok {
-		if cBool, ok := c.(bool); ok {
-			clean = cBool
-		}
-	}
+	maxTokens := optionalIntArg(args, "max_tokens", 2000)
+	clean := optionalBoolArg(args, "clean", true)
 
 	// Extract text for the direct-return decision. clean/raw only affects the
 	// direct-return text; the chunk workflow always uses cleaned text (via

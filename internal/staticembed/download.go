@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// hfRevision is the pinned Hugging Face commit SHA for the embedding model.
+// TODO: replace "main" with the exact immutable commit SHA to protect against
+// model changes on Hugging Face. To find the SHA, visit the model page and
+// copy the commit hash from the "Files and versions" section.
+const hfRevision = "main"
+
 // EnsureModel downloads tokenizer.json, model.safetensors and (best-effort)
 // config.json for a Hugging Face repo into cacheDir on first use, and returns
 // the local model directory. Subsequent runs reuse the cached files. Files are
@@ -39,7 +45,7 @@ func EnsureModel(ctx context.Context, repo, cacheDir string) (string, error) {
 }
 
 func hfURL(repo, file string) string {
-	return "https://huggingface.co/" + repo + "/resolve/main/" + file
+	return "https://huggingface.co/" + repo + "/resolve/" + hfRevision + "/" + file
 }
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }

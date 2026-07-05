@@ -3,6 +3,8 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 func unknownToolError(name string) error {
@@ -35,43 +37,97 @@ func optionalStringArg(args map[string]any, key, def string) string {
 	return s
 }
 
-// intArg extracts a required integer argument (JSON numbers decode as float64).
+// coerceInt converts a JSON-decoded value to int. Local models frequently emit
+// numbers as strings (e.g. "3"), so accept float64, int, json.Number, and
+// numeric strings rather than only float64.
+func coerceInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return int(f), true
+		}
+	}
+	return 0, false
+}
+
+// coerceBool converts a JSON-decoded value to bool, accepting real bools as well
+// as the string/number forms small models tend to produce.
+func coerceBool(v any) (bool, bool) {
+	switch b := v.(type) {
+	case bool:
+		return b, true
+	case float64:
+		return b != 0, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case "true", "yes", "1", "on":
+			return true, true
+		case "false", "no", "0", "off":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// coerceFloat converts a JSON-decoded value to float64, tolerating numeric
+// strings the way coerceInt/coerceBool tolerate their forms.
+func coerceFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return f, true
+		}
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+// intArg extracts a required integer argument (tolerant of numeric strings).
 func intArg(args map[string]any, key string) (int, error) {
 	v, ok := args[key]
 	if !ok {
 		return 0, fmt.Errorf("missing required argument %q", key)
 	}
-	f, ok := v.(float64)
+	n, ok := coerceInt(v)
 	if !ok {
 		return 0, fmt.Errorf("argument %q must be an integer", key)
 	}
-	return int(f), nil
+	return n, nil
 }
 
-// optionalIntArg extracts an optional integer argument (JSON numbers decode as float64).
+// optionalIntArg extracts an optional integer argument (tolerant of numeric strings).
 func optionalIntArg(args map[string]any, key string, def int) int {
-	v, ok := args[key]
-	if !ok {
-		return def
+	if v, ok := args[key]; ok {
+		if n, ok := coerceInt(v); ok {
+			return n
+		}
 	}
-	f, ok := v.(float64)
-	if !ok {
-		return def
-	}
-	return int(f)
+	return def
 }
 
-// optionalBoolArg extracts an optional boolean argument.
+// optionalBoolArg extracts an optional boolean argument (tolerant of "true"/"1"/etc.).
 func optionalBoolArg(args map[string]any, key string, def bool) bool {
-	v, ok := args[key]
-	if !ok {
-		return def
+	if v, ok := args[key]; ok {
+		if b, ok := coerceBool(v); ok {
+			return b
+		}
 	}
-	b, ok := v.(bool)
-	if !ok {
-		return def
-	}
-	return b
+	return def
 }
 
 // stringSliceArg extracts an optional array-of-strings argument, ignoring

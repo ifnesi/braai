@@ -384,8 +384,9 @@ braai loads and runs itself. Static embeddings are a token→vector lookup plus
 mean-pool plus L2-normalize — no neural forward pass, no server, microseconds
 per chunk. The model files (`tokenizer.json`, `model.safetensors`, `config.json`)
 are downloaded once from Hugging Face into `~/.braai/models/<repo>/` and reused
-thereafter. Ollama is not involved in embeddings at all, so semantic search
-keeps working even with Ollama stopped.
+thereafter. The download URL is pinned to a specific revision to protect
+against supply-chain changes. Ollama is not involved in embeddings at all, so
+semantic search keeps working even with Ollama stopped.
 
 **Passage-level results.** Rather than ranking whole files, semantic search
 chunks each file and ranks chunks across the whole tree (or within a single
@@ -426,6 +427,10 @@ All tool paths are resolved through `internal/security`, which:
 - Re-resolves symlinks for paths that exist on disk and re-checks
   containment, so a symlink inside the working directory cannot be used to
   read a file outside it.
+- For non-existent paths, validates that the parent directory doesn't escape
+  via symlink, closing the edge case where a symlink directory inside the
+  root pointing outside could be combined with a non-existent child to
+  bypass containment.
 
 No tool ever opens a file for writing, and no command-execution tool is
 exposed to the model, so there is no path by which the agent can modify your

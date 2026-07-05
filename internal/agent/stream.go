@@ -23,6 +23,9 @@ type streamPrinter struct {
 	inCodeBlock bool
 	printedAny  bool
 	spinnerStop bool // true once we've stopped the spinner
+	// trailingBacktick buffers an opening backtick if a chunk ends with one,
+	// so inline spans split across chunks can still be styled on the next chunk.
+	trailingBacktick string
 }
 
 func newStreamPrinter(out io.Writer, showReasoning bool, lv terminal.Level, sp *terminal.Spinner) *streamPrinter {
@@ -97,11 +100,16 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 
 // applyContentStyle applies per-chunk syntax colouring to answer content:
 //   - toggles green colouring around fenced code blocks (``` fences)
-//   - applies bold to inline `backtick` spans
+//   - applies bold to inline `backtick` spans (including those split across chunks)
 func (p *streamPrinter) applyContentStyle(s string) string {
 	if p.colorLevel == terminal.None {
 		return s
 	}
+
+	// Prepend any trailing backtick from the prior chunk so inline spans split
+	// across chunks can still be styled.
+	s = p.trailingBacktick + s
+	p.trailingBacktick = ""
 
 	var b strings.Builder
 	remaining := s
@@ -114,7 +122,18 @@ func (p *streamPrinter) applyContentStyle(s string) string {
 			if p.inCodeBlock {
 				b.WriteString(chunk)
 			} else {
-				b.WriteString(terminal.ApplyInlineCode(p.colorLevel, chunk))
+				styled := terminal.ApplyInlineCode(p.colorLevel, chunk)
+				// Only carry a trailing backtick when it is genuinely an UNCLOSED
+				// opening backtick: an odd number of backticks means the last one
+				// is unmatched, and it must sit at the very end so ApplyInlineCode
+				// left it literal (making the last byte safe to strip). A chunk
+				// ending in a COMPLETED span like `code` has an even count — the
+				// old check chopped the ANSI reset and emitted a stray backtick.
+				if strings.Count(chunk, "`")%2 == 1 && strings.HasSuffix(chunk, "`") {
+					p.trailingBacktick = "`"
+					styled = styled[:len(styled)-1] // hold the unmatched backtick for next chunk
+				}
+				b.WriteString(styled)
 			}
 			break
 		}
@@ -159,6 +178,13 @@ func (p *streamPrinter) finish() {
 			fmt.Fprint(p.out, terminal.Reset(p.colorLevel))
 		}
 	}
+
+	// Flush any backtick we were holding for a chunk that never came.
+	if p.trailingBacktick != "" {
+		fmt.Fprint(p.out, p.trailingBacktick)
+		p.trailingBacktick = ""
+	}
+
 	if p.printedAny {
 		fmt.Fprintln(p.out)
 	}

@@ -1,5 +1,15 @@
 # braai
 
+<table border="0" cellpadding="0" cellspacing="0"><tr>
+<td valign="top"><pre>
+ ╭◠◠◠◠◠╮
+ |_____|
+ [◕ ‿ ◕]
+&lt;╞═════╡&gt;
+ |_____|
+</pre></td>
+<td valign="top" style="padding-left:1.5em">
+
 `braai` is a small, read-only AI agent CLI that answers questions about a local
 working directory. It uses a local [Ollama](https://ollama.com) server for
 reasoning and lets the model call a fixed set of read-only filesystem tools
@@ -7,6 +17,7 @@ reasoning and lets the model call a fixed set of read-only filesystem tools
 whole tree, read/extract/search documents, stat, and — on vision-capable
 models — read/OCR images) to gather evidence before answering. It never writes,
 deletes, or executes anything on your filesystem.
+</td></tr></table>
 
 Semantic search runs on a **fast, in-process static embedding model** that braai
 downloads once from Hugging Face and runs itself — no Ollama embedding model and
@@ -105,17 +116,33 @@ JSON object per answer once it's complete:
 omitted if the model answered without using any tools. This works in both
 one-shot and interactive chat mode (one JSON object per turn).
 
+### Startup banner
+
+When braai starts an interactive session it prints a mascot alongside the
+session info:
+
+```
+ ╭◠◠◠◠◠╮   braai 0.2.1
+ |_____|   Working directory: /your/project
+ [◕ ‿ ◕]   Model: qwen3:35b
+<╞═════╡>
+ |_____|    Use Ctrl + d or /bye to exit, or /help for commands.
+
+>>>
+```
+
 The interactive chat uses a cyan `>>>` prompt (plain `>>>` in no-colour
 terminals) and supports standard readline-style line editing: left/right arrows
 to move within the line, Ctrl-A/Ctrl-E to jump to the start/end, Ctrl-C to
 interrupt an in-progress response (prints `^C  (interrupted)`) or clear the
 current input line (shows a hint to exit via Ctrl + d or `/bye`), and up/down
 arrows to recall history from previous sessions. The prompt turns red after an
-agent error and resets on the next turn. Chat history is persisted to
-`~/.braai/chat_history` **encrypted at rest** with AES-256-GCM (using the
-machine-local key at `~/.braai/cache.key`), so no plaintext prompts are written
-to disk. The history limit is configured in `~/.braai/braai.conf` via
-`history_limit` (default: 100 entries).
+agent error and resets on the next turn. Use `/config mode light` to switch to
+a blue prompt better suited to light terminal backgrounds. Chat history is
+persisted to `~/.braai/chat_history` **encrypted at rest** with AES-256-GCM
+(using the machine-local key at `~/.braai/cache.key`), so no plaintext prompts
+are written to disk. The history limit is configured in `~/.braai/braai.conf`
+via `history_limit` (default: 100 entries).
 
 While the model is working, an animated spinner with a label is shown: **Thinking…**
 on the first turn, **Reasoning…** while it processes a tool result. Each tool the
@@ -134,10 +161,10 @@ A few slash-commands are available inside the chat. Press **Tab** after `/` (or 
 | `/clear` | Reset the conversation history and clear the visible screen |
 | `/forget-history` | Erase `~/.braai/chat_history` (the encrypted up/down recall history) |
 | `/tools [full]` | List tools available to the model; `full` also shows each tool's arguments |
-| `/tree [hidden]` | Show the working directory as an ASCII tree; `hidden` includes dotfiles |
+| `/tree [<glob>]` | Show the working directory as an ASCII tree; optional glob filters root entries (e.g. `/tree internal*`, `/tree internal/ag*`) |
 | `/digest` | Produce a structured project overview (walks tree, reads key files) |
 | `/model [<name>]` | Show available models, or switch to `<name>` and save as default |
-| `/config [<key> [<value>]]` | List all settings / show one / change one |
+| `/config [<key> [<value>]]` | List all settings / show one / change one (e.g. `/config mode light`) |
 | `/save <file>` | Save the conversation transcript as Markdown |
 | `/export json <file>` | Save the conversation as a JSON array `[{role, content}]` |
 | `/copy [last]` | Copy full conversation to clipboard; `last` copies only the most recent answer |
@@ -319,6 +346,7 @@ max_document_bytes=131072
 
 - `ollama_host` — URL of your Ollama server (default: `http://localhost:11434`)
 - `model` — Default chat model (auto-detected from first available if blank)
+- `mode` — Colour scheme: `dark` (default, cyan `>>>` prompt) or `light` (blue prompt, better on white/light terminal backgrounds). Hot-applied immediately via `/config mode light` — no restart needed.
 - `embed_model` — Hugging Face repo of the static embedding model (default: `minishlab/potion-retrieval-32M`). This is **not** an Ollama model — it's a model2vec repo that braai downloads and runs in-process.
 - `max_tool_calls` — Max tool calls per response (default: `100`)
 - `ollama_timeout` — HTTP timeout in seconds for Ollama calls (default: `300` / 5 min)

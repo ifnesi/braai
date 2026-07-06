@@ -13,6 +13,7 @@ const (
 	ansiRed    = "\x1b[31m"
 	ansiGreen  = "\x1b[32m"
 	ansiYellow = "\x1b[33m"
+	ansiBlue   = "\x1b[34m"
 	ansiCyan   = "\x1b[36m"
 	ansiReset  = "\x1b[0m"
 )
@@ -63,6 +64,15 @@ func Yellow(lv Level, s string) string {
 		return s
 	}
 	return ansiYellow + s + ansiReset
+}
+
+// Blue wraps s with blue foreground SGR codes when lv >= Basic.
+// Used for the prompt in light mode where cyan can be hard to read.
+func Blue(lv Level, s string) string {
+	if lv == None {
+		return s
+	}
+	return ansiBlue + s + ansiReset
 }
 
 // DimOpen returns the raw open-dim escape when lv >= Basic (empty string

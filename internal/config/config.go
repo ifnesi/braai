@@ -14,6 +14,7 @@ import (
 type Settings struct {
 	OllamaHost         string
 	Model              string
+	Mode               string // "dark" (default) or "light"
 	EmbedModel         string
 	MaxToolCalls       int
 	HistoryLimit       int
@@ -163,6 +164,8 @@ func Load() (*Settings, error) {
 			s.OllamaHost = val
 		case "model":
 			s.Model = val
+		case "mode":
+			s.Mode = val
 		case "embed_model":
 			s.EmbedModel = val
 		case "max_tool_calls":
@@ -259,6 +262,9 @@ func Save(s *Settings) error {
 	}
 	if s.Model != "" {
 		add("model", s.Model)
+	}
+	if s.Mode != "" {
+		add("mode", s.Mode)
 	}
 	if s.EmbedModel != "" {
 		add("embed_model", s.EmbedModel)
@@ -555,6 +561,8 @@ var ConfigDefs = []ConfigDef{
 		Description: "URL of the local Ollama server (used for the chat model only)."},
 	{Key: "model", Type: "string", Section: "Core", Hot: false, ReadOnly: true,
 		Description: "Default chat model. Use /model <name> to change."},
+	{Key: "mode", Type: "string", Section: "Core", Hot: true,
+		Description: "Colour scheme: dark (default, cyan prompt) or light (blue prompt, no dim — for light terminal backgrounds)."},
 	{Key: "embed_model", Type: "string", Section: "Core", Hot: false,
 		Description: "Hugging Face repo of the static embedding model run in-process for semantic search."},
 	{Key: "max_tool_calls", Type: "int", Section: "Core", Hot: true,
@@ -613,6 +621,11 @@ func GetCurrentValue(s *Settings, key string) string {
 		return s.OllamaHost
 	case "model":
 		return s.Model
+	case "mode":
+		if s.Mode == "" {
+			return "dark"
+		}
+		return s.Mode
 	case "embed_model":
 		return s.EmbedModel
 	case "max_tool_calls":
@@ -670,6 +683,11 @@ func SetField(s *Settings, key, value string) error {
 	switch key {
 	case "model":
 		return fmt.Errorf("model cannot be set via /config; use /model <name> instead")
+	case "mode":
+		if value != "dark" && value != "light" {
+			return fmt.Errorf("mode: must be %q or %q, got %q", "dark", "light", value)
+		}
+		s.Mode = value
 	case "ollama_host":
 		s.OllamaHost = value
 	case "embed_model":

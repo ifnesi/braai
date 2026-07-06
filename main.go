@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.2.0"
+const version = "0.2.1"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -417,6 +417,9 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 // updated values — the rebuild is cheap (no model download).
 func (s *chatSession) applyConfigField(ctx context.Context, key string) error {
 	switch key {
+	case "mode":
+		// Handled inline in runChat (rl.SetPrompt); no agent rebuild needed.
+		return nil
 	case "max_tool_calls":
 		s.maxToolCalls = s.settings.MaxToolCalls
 	case "num_ctx":
@@ -507,6 +510,21 @@ func printJSONResult(w io.Writer, result agent.RunResult) error {
 	return enc.Encode(result)
 }
 
+// promptForMode returns the readline prompt string for the given colour level
+// and mode setting. In dark mode (or when mode is unset) the prompt is cyan;
+// in light mode it uses blue, which remains legible on white/light backgrounds
+// where cyan can be near-invisible. When colourLevel is None, no ANSI codes
+// are emitted regardless of mode.
+func promptForMode(lv terminal.Level, mode string) string {
+	if lv == terminal.None {
+		return ">>> "
+	}
+	if mode == "light" {
+		return terminal.Blue(lv, ">>> ")
+	}
+	return terminal.Cyan(lv, ">>> ")
+}
+
 // runChat drives an interactive prompt with readline-style line editing:
 // left/right arrows, Ctrl-A/Ctrl-E to jump to the start/end of the line, and
 // Ctrl-C to clear the current input instead of killing the process (Ctrl + d
@@ -525,10 +543,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	// limit shouldn't crop our entries during the session.
 	readlineHistoryLimit := historyLimit * 10
 
-	promptNormal := ">>> "
-	if session.colorLevel != terminal.None {
-		promptNormal = terminal.Cyan(session.colorLevel, ">>> ")
-	}
+	promptNormal := promptForMode(session.colorLevel, session.settings.Mode)
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:        promptNormal,
 		HistoryLimit:  readlineHistoryLimit,
@@ -554,15 +569,33 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		fmt.Fprintf(os.Stderr, "warning: could not open encrypted chat history: %v\n", herr)
 	}
 
-	fmt.Fprintf(rl.Stdout(), "%s %s\n%s %s\n%s %s\n\n%s\n",
-		terminal.Bold(session.colorLevel, "braai"), terminal.Bold(session.colorLevel, version),
-		"Working directory:", terminal.Cyan(session.colorLevel, session.workingDir),
-		"Model:", terminal.Green(session.colorLevel, session.model),
-		terminal.Dim(session.colorLevel, "Use Ctrl + d or /bye to exit, or /help for commands."))
+	// Banner: mascot on the left, info on the right, side-by-side.
+	// The mascot is 5 lines; info rows are assigned to lines 0, 1, 2, 4.
+	mascot := []string{
+		` ╭◠◠◠◠◠╮`,
+		` |_____|`,
+		` [◕ ‿ ◕]`,
+		`<╞═════╡>`,
+		` |_____|`,
+	}
+	info := []string{
+		terminal.Bold(session.colorLevel, "braai") + " " + terminal.Bold(session.colorLevel, version),
+		"Working directory: " + terminal.Cyan(session.colorLevel, session.workingDir),
+		"Model: " + terminal.Green(session.colorLevel, session.model),
+		"",
+		terminal.Dim(session.colorLevel, "Use Ctrl + d or /bye to exit, or /help for commands."),
+	}
+	// Pad each mascot line to a fixed visual width so the info column aligns cleanly.
+	const mascotWidth = 10
+	for i, m := range mascot {
+		pad := strings.Repeat(" ", mascotWidth-len([]rune(m)))
+		fmt.Fprintf(rl.Stdout(), "%s%s  %s\n", m, pad, info[i])
+	}
+	fmt.Fprintln(rl.Stdout())
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
-		rl.SetPrompt(promptNormal) // reset to normal after any previous error
+		rl.SetPrompt(promptForMode(session.colorLevel, session.settings.Mode)) // reset to normal after any previous error
 		line, err := rl.Readline()
 		if errors.Is(err, readline.ErrInterrupt) {
 			// Ctrl-C: reset any open ANSI styling (e.g. dim codes from thinking),
@@ -694,16 +727,19 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 			{"/clear", "reset the conversation history"},
 			{"/forget-history", "erase ~/.braai/chat_history (the up/down recall history)"},
 			{"/tools [full]", "list tools available to the model (full: also show arguments)"},
-			{"/tree [hidden]", "show working directory as an ASCII tree (hidden: include dotfiles)"},
+			{"/tree [<glob>]", "show working directory as an ASCII tree; optional glob filters root entries (e.g. /tree internal*)"},
 			{"/digest", "produce a structured project overview (walks tree, reads key files)"},
 			{"/model [<name>]", "show models or switch to <name> and save as default"},
-			{"/config [<key> [<value>]]", "list / show / change settings"},
+			{"/config [<key> [<value>]]", "list / show / change settings  (e.g. /config mode light)"},
 			{"/save <file>", "save the conversation transcript to a Markdown file"},
 			{"/export json <file>", "save conversation as a JSON array"},
 			{"/copy [last]", "copy full conversation (or last answer) to clipboard"},
 			{"/cache [clear]", "show semantic-search cache stats (clear: wipe it)"},
 			{"/cmd [<name> [args...]]", "run a custom prompt template (/cmd to list)"},
-			{"@<path>", "attach a file inline; Tab-completes paths (use \\ for spaces)"},
+			{"@<path>", "inline a file's content into the prompt sent to the model"},
+			{"", "  supported: text, PDF, Word, Excel, HTML, and more"},
+			{"", "  multiple @tokens allowed per message (e.g. @a.txt @b.pdf)"},
+			{"", "  escape spaces with \\ (e.g. @my\\ file.txt); Tab-completes paths"},
 			{"/help", "show this message"},
 			{"/bye, exit, quit", "leave the chat (Ctrl + d also works)"},
 		}
@@ -742,7 +778,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		// wipe both the on-disk file and the in-memory copy readline is holding.
 		if session.hist != nil {
 			if err := session.hist.Clear(); err != nil {
-				fmt.Fprintf(out, "could not erase chat history: %v\n", err)
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not erase chat history: "+err.Error()))
 				return history
 			}
 		}
@@ -770,7 +806,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 	case "/model":
 		available, err := session.client.ListModels(ctx)
 		if err != nil {
-			fmt.Fprintf(out, "could not list models from ollama: %v\n", err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not list models from ollama: "+err.Error()))
 			return history
 		}
 
@@ -800,7 +836,8 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 			}
 		}
 		if !found {
-			fmt.Fprintf(out, "unknown model %q. Available models:\n", target)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("unknown model %q", target)))
+			fmt.Fprintln(out, "Available models:")
 			for _, m := range available {
 				fmt.Fprintf(out, "  %s\n", m)
 			}
@@ -808,7 +845,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		}
 
 		if err := session.switchModel(ctx, target); err != nil {
-			fmt.Fprintf(out, "could not switch to model %q: %v\n", target, err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("could not switch to model %q: %v", target, err)))
 			return history
 		}
 		fmt.Fprintf(out, "Switched to model %s (saved as default).\n", target)
@@ -816,11 +853,11 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 
 	case "/save":
 		if len(fields) < 2 {
-			fmt.Fprintln(out, "usage: /save <file>")
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "usage: /save <file>"))
 			return history
 		}
 		if err := saveTranscript(fields[1], history); err != nil {
-			fmt.Fprintf(out, "could not save transcript: %v\n", err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not save transcript: "+err.Error()))
 		} else {
 			fmt.Fprintf(out, "saved conversation to %s\n", fields[1])
 		}
@@ -831,11 +868,11 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 			// /copy last — copy only the most recent assistant answer.
 			last := lastAssistantMessage(history)
 			if last == "" {
-				fmt.Fprintln(out, "no answer to copy yet")
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "no answer to copy yet"))
 				return history
 			}
 			if err := copyToClipboard(last); err != nil {
-				fmt.Fprintf(out, "could not copy to clipboard: %v\n", err)
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not copy to clipboard: "+err.Error()))
 			} else {
 				fmt.Fprintln(out, "last answer copied to clipboard")
 			}
@@ -844,11 +881,11 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		// /copy — copy the full conversation transcript.
 		transcript, err := formatTranscript(history)
 		if err != nil {
-			fmt.Fprintf(out, "could not format transcript: %v\n", err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not format transcript: "+err.Error()))
 			return history
 		}
 		if err := copyToClipboard(transcript); err != nil {
-			fmt.Fprintf(out, "could not copy to clipboard: %v\n", err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not copy to clipboard: "+err.Error()))
 		} else {
 			fmt.Fprintln(out, "conversation copied to clipboard")
 		}
@@ -856,30 +893,107 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 
 	case "/export":
 		if len(fields) < 3 || fields[1] != "json" {
-			fmt.Fprintln(out, "usage: /export json <file>")
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "usage: /export json <file>"))
 			return history
 		}
 		if err := saveTranscriptJSON(fields[2], history); err != nil {
-			fmt.Fprintf(out, "could not export: %v\n", err)
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not export: "+err.Error()))
 		} else {
 			fmt.Fprintf(out, "exported conversation to %s\n", fields[2])
 		}
 		return history
 
 	case "/tree":
-		showHidden := len(fields) >= 2 && fields[1] == "hidden"
-		fmt.Fprintln(out, ".")
-		printTree(out, session.workingDir, "", showHidden)
+		// Parse optional glob pattern: /tree [<glob>]
+		// The glob may include a path prefix (e.g. "internal/ag*"), in which case
+		// the directory part is navigated into and only the final name component
+		// is matched. Any trailing slash is stripped before processing.
+		var globPattern string
+		if len(fields) >= 2 {
+			globPattern = strings.TrimSuffix(fields[1], "/")
+		}
+
+		if globPattern == "" {
+			// No filter: show the full tree as before.
+			fmt.Fprintln(out, ".")
+			printTree(out, session.workingDir, "", false)
+		} else {
+			// Split into directory prefix + name glob.
+			// e.g. "internal/ag*" → globDir="internal", nameGlob="ag*"
+			// e.g. "internal*"    → globDir="",          nameGlob="internal*"
+			globDir := filepath.Dir(globPattern)
+			nameGlob := filepath.Base(globPattern)
+			if globDir == "." {
+				globDir = ""
+			}
+
+			searchRoot := session.workingDir
+			if globDir != "" {
+				searchRoot = filepath.Join(searchRoot, globDir)
+			}
+
+			entries, err := os.ReadDir(searchRoot)
+			if err != nil {
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not read directory: "+err.Error()))
+				return history
+			}
+			skipNames := map[string]bool{
+				".git": true, "node_modules": true, "vendor": true,
+				".idea": true, ".DS_Store": true,
+			}
+			var matched []os.DirEntry
+			for _, e := range entries {
+				name := e.Name()
+				if skipNames[name] || strings.HasPrefix(name, ".") {
+					continue
+				}
+				ok, err := filepath.Match(nameGlob, name)
+				if err != nil {
+					fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("invalid glob pattern %q: %v", globPattern, err)))
+					return history
+				}
+				if ok {
+					matched = append(matched, e)
+				}
+			}
+			if len(matched) == 0 {
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("no entries matching %q", globPattern)))
+				return history
+			}
+			// Print a synthetic root label showing the navigated path.
+			displayRoot := "."
+			if globDir != "" {
+				displayRoot = globDir + "/"
+			}
+			fmt.Fprintln(out, displayRoot)
+			for i, e := range matched {
+				last := i == len(matched)-1
+				connector := "├── "
+				childPrefix := "│   "
+				if last {
+					connector = "└── "
+					childPrefix = "    "
+				}
+				label := e.Name()
+				if e.IsDir() {
+					label += "/"
+				}
+				fmt.Fprintf(out, "%s%s\n", connector, label)
+				if e.IsDir() {
+					printTree(out, filepath.Join(searchRoot, e.Name()), childPrefix, false)
+				}
+			}
+		}
 		return history
 
 	case "/cache":
 		if session.cache == nil {
-			fmt.Fprintln(out, "semantic cache is disabled")
+			fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "semantic cache is disabled"))
 			return history
 		}
 		if len(fields) >= 2 && fields[1] == "clear" {
 			if err := session.cache.Clear(); err != nil {
-				fmt.Fprintf(out, "could not clear cache: %v\n", err)
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not clear cache: "+err.Error()))
 			} else {
 				fmt.Fprintln(out, "semantic cache cleared")
 			}
@@ -932,7 +1046,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 				}
 			}
 			if found == nil {
-				fmt.Fprintf(out, "unknown config key %q; run /config to list all valid keys\n", key)
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("unknown config key %q; run /config to list all valid keys", key)))
 				return history
 			}
 			val := config.GetCurrentValue(session.settings, key)
@@ -976,6 +1090,10 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 				if err := session.applyConfigField(ctx, key); err != nil {
 					fmt.Fprintf(out, "%s\n", terminal.Yellow(session.colorLevel, "saved but could not hot-apply: "+err.Error()))
 				} else {
+					// For "mode", update the live prompt immediately.
+					if key == "mode" {
+						rl.SetPrompt(promptForMode(session.colorLevel, session.settings.Mode))
+					}
 					fmt.Fprintf(out, "%s = %s  %s\n",
 						terminal.Bold(session.colorLevel, key),
 						terminal.Cyan(session.colorLevel, value),
@@ -993,7 +1111,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		return history
 
 	default:
-		fmt.Fprintf(out, "unknown command %q; try /help\n", cmd)
+		fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("unknown command %q; try /help", cmd)))
 		return history
 	}
 }
@@ -1314,8 +1432,9 @@ func expandAtTokens(line string, session *chatSession, out io.Writer) (string, e
 	return result, nil
 }
 
-// braaiCompleter implements readline.AutoCompleter. It handles two cases:
-//   - Current word starts with "/" → complete slash-commands.
+// braaiCompleter implements readline.AutoCompleter. It handles three cases:
+//   - Current word starts with "/" and is the first token → complete slash-commands.
+//   - Line starts with "/tree " and cursor is on the second token → complete root-level directory names.
 //   - Current word starts with "@" → complete file paths in the working directory.
 type braaiCompleter struct {
 	root *security.Root
@@ -1352,6 +1471,55 @@ func (c *braaiCompleter) Do(line []rune, pos int) (newLine [][]rune, length int)
 			}
 		}
 		return newLine, len(word)
+	}
+
+	// "/tree" second-token completion — directory names, supporting sub-paths.
+	// e.g. "/tree int"       → lists root dirs matching "int*"
+	//      "/tree internal/" → lists dirs inside internal/
+	//      "/tree internal/ag" → lists dirs inside internal/ matching "ag*"
+	lineStr := string(line[:pos])
+	if wordStart > 0 && strings.HasPrefix(lineStr, "/tree ") {
+		prefix := strings.TrimPrefix(lineStr[:wordStart], "/tree ")
+		// Only complete the immediately following token (no spaces in prefix).
+		if !strings.Contains(strings.TrimSpace(prefix), " ") {
+			// Split the word into a directory part and a basename prefix,
+			// mirroring the same logic used in the /tree handler.
+			partial := word // e.g. "internal/" or "internal/ag" or "int"
+			treeDir := filepath.Dir(partial)
+			treeBase := filepath.Base(partial)
+			if treeDir == "." {
+				treeDir = ""
+			}
+			if partial == "" || strings.HasSuffix(partial, "/") {
+				treeDir = strings.TrimSuffix(partial, "/")
+				treeBase = ""
+			}
+
+			searchDir := c.root.Abs()
+			if treeDir != "" {
+				searchDir = filepath.Join(searchDir, treeDir)
+			}
+
+			entries, err := os.ReadDir(searchDir)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsDir() {
+						continue
+					}
+					name := e.Name()
+					if strings.HasPrefix(name, ".") {
+						continue
+					}
+					if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(treeBase)) {
+						continue
+					}
+					// Return only the basename suffix — readline replaces len(treeBase)
+					// chars before the cursor, leaving the already-typed dir prefix intact.
+					newLine = append(newLine, []rune(name[len(treeBase):]))
+				}
+				return newLine, len(treeBase)
+			}
+		}
 	}
 
 	// "@" completion — file paths from the working directory.
@@ -1392,23 +1560,17 @@ func (c *braaiCompleter) Do(line []rune, pos int) (newLine [][]rune, length int)
 		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
 			continue
 		}
-		// Build the escaped candidate path to insert into the line.
+		// Return only the suffix readline needs to append: the characters of
+		// the escaped name that come after what the user has already typed
+		// (len(base) unescaped chars). readline replaces len(base) chars before
+		// the cursor with this suffix, producing the full name in-place.
 		escapedName := strings.ReplaceAll(name, " ", `\ `)
-		var candidate string
-		if dir != "" {
-			escapedDir := strings.ReplaceAll(dir, " ", `\ `)
-			candidate = escapedDir + "/" + escapedName
-		} else {
-			candidate = escapedName
-		}
 		if e.IsDir() {
-			candidate += "/"
+			escapedName += "/"
 		}
-		// Return only the suffix readline needs to append after the current word.
-		suffix := "@" + candidate
-		newLine = append(newLine, []rune(suffix[len(word):]))
+		newLine = append(newLine, []rune(escapedName[len(base):]))
 	}
-	return newLine, len(word)
+	return newLine, len(base)
 }
 
 // citation holds one source reference extracted from a tool call.

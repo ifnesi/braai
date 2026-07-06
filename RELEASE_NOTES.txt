@@ -12,6 +12,61 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.2.1] - 2026-07-06
+---------------------
+
+Added
+  - Mascot ASCII art displayed in the startup banner, side-by-side with the
+    version, working directory, model, and hint line.
+  - @path TAB completion now shows readline's native column-list when multiple
+    matches exist. The completer returns only the untyped suffix of each
+    candidate, so readline replaces only the partial basename and displays
+    clean short names in the picker.
+  - /tree [<glob>] command now accepts an optional glob pattern to filter
+    which root-level entries are shown (e.g. /tree internal* or /tree internal/ag*).
+    Patterns with a path separator navigate into the prefix directory and match
+    only the final name component. TAB after /tree completes directory names,
+    including sub-paths (e.g. /tree internal/ + TAB lists dirs inside internal/).
+  - /config mode [dark|light] setting. Persisted to braai.conf; hot-applied
+    immediately (no restart required). In light mode the >>> prompt switches from
+    cyan to blue, keeping it legible on white/light terminal backgrounds.
+    terminal.Blue() helper added to internal/terminal/style.go.
+
+Changed
+  - /help @<path> entry expanded from one line to four: explains what attachments
+    are (file content inlined into the prompt), supported formats, multiple tokens
+    per message, and space-escaping with Tab completion.
+  - /config entry in /help now includes a usage hint: "(e.g. /config mode light)".
+  - /tree entry in /help updated to /tree [<glob>]; the "hidden" sub-argument
+    (include dotfiles) has been removed.
+  - All error and warning messages in handleSlashCommand are now styled red
+    (terminal.Red) consistently across every command: /forget-history, /model,
+    /save, /copy, /export, /tree, /cache, /config, and the unknown-command
+    fallback.
+  - /tree glob output now prints a synthetic root label (e.g. "internal/") when
+    a path-prefixed glob is used, so the tree is visually anchored.
+
+Fixed
+  - @path TAB completion double-typed the directory prefix (e.g. @RELEARELEASE_NOTES.txt).
+    Root cause: the completer returned the full escaped filename as the suffix
+    instead of only the characters after what the user had already typed.
+  - /tree [TAB] appended a trailing "/" to the completion, causing the command to
+    receive "img/" as the glob — which never matched because filepath.Match
+    compares against bare entry names. Trailing slash stripped from completions
+    and from the parsed glob pattern.
+  - /tree [TAB] did not complete sub-paths (e.g. /tree internal/ + TAB listed
+    root entries instead of entries inside internal/). Completer now splits the
+    typed word into a directory prefix and basename, navigates into the prefix
+    directory, and returns only the basename suffix.
+  - /config mode did not take effect: applyConfigField fell through to switchModel
+    for the "mode" key, which could return a network error — causing the rl.SetPrompt
+    hot-apply to be skipped. Fixed by returning nil early from applyConfigField for
+    "mode".
+  - /tree internal/ag* failed with "no entries matching": the old code passed the
+    full pattern to filepath.Match against root entry names, so patterns containing
+    a path separator never matched. Fixed by splitting the pattern into globDir and
+    nameGlob and reading entries from the resolved subdirectory.
+
 [0.2.0] - 2026-07-06
 ---------------------
 

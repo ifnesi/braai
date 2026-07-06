@@ -95,7 +95,7 @@ func (r *Registry) readBatch(args map[string]any) (Result, error) {
 	var b strings.Builder
 	for _, p := range paths {
 		fmt.Fprintf(&b, "=== %s ===\n", p)
-		text, err := r.readAnyText(p)
+		text, err := r.ReadAnyText(p)
 		if err != nil {
 			fmt.Fprintf(&b, "error: %v\n\n", err)
 			continue
@@ -106,10 +106,10 @@ func (r *Registry) readBatch(args map[string]any) (Result, error) {
 	return textResult(b.String()), nil
 }
 
-// readAnyText returns the full text of a single file: extracted+cleaned text for
-// document formats, or the plain-text reader's output otherwise. Used by batch
-// reads (which return full text rather than a chunk manifest).
-func (r *Registry) readAnyText(relPath string) (string, error) {
+// ReadAnyText returns the full text of a single file: extracted+cleaned text
+// for document formats, or the plain-text reader's output otherwise. Used by
+// batch reads and by the REPL's @path attachment expansion.
+func (r *Registry) ReadAnyText(relPath string) (string, error) {
 	if documentExtensions[strings.ToLower(filepath.Ext(relPath))] {
 		absPath, err := r.root.Resolve(relPath)
 		if err != nil {

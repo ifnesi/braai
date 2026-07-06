@@ -34,6 +34,21 @@ import (
 // version is the released version of braai, printed by --version.
 const version = "0.2.0"
 
+// digestPrompt is the fixed prompt submitted by --summarize / /digest.
+const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
+
+Steps:
+1. Use list_dir with a large depth (e.g. 100) to understand the full tree.
+2. Read the key files: README, main entry points, configuration, docs, and any obvious "about this project" files.
+3. Produce a structured overview with these sections:
+   - Purpose — what this project does and who it is for
+   - Structure — the directory layout and what each major part contains
+   - Key files — the most important files and what each one does
+   - Dependencies — external libraries or services it relies on
+   - Conventions — any notable patterns, naming conventions, or architecture decisions
+
+Be concrete and specific. Cite file paths where relevant.`
+
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
 const defaultEmbedModel = "minishlab/potion-retrieval-32M"
@@ -61,6 +76,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		maxReadBytes  = fs.Int("max-read-bytes", -1, "Maximum bytes read_file returns (-1 = no limit)")
 		showVersion   = fs.Bool("version", false, "Print the braai version and exit")
 		outputFormat  = fs.String("output", "text", `Output format: "text" (default, streamed to stdout as produced) or "json" (buffered; a single JSON object per answer with the answer, reasoning, and tool calls used)`)
+		summarize     = fs.Bool("summarize", false, "Produce a structured project overview and exit (walks the tree, reads key files)")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `braai %s - a read-only AI agent over a local working directory
@@ -262,6 +278,13 @@ Flags:
 	trailing := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	initialPrompt := firstNonEmpty(*prompt, trailing)
 
+	if *summarize {
+		if initialPrompt != "" {
+			return fmt.Errorf("--summarize cannot be combined with --prompt or a trailing argument")
+		}
+		initialPrompt = digestPrompt
+	}
+
 	if initialPrompt == "" && !terminal.IsTerminal(stdin) {
 		// stdin is piped and no explicit prompt/trailing args given: treat all of stdin as the prompt.
 		data, readErr := io.ReadAll(stdin)
@@ -388,6 +411,44 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 	return nil
 }
 
+// applyConfigField syncs live session state from s.settings after a hot-
+// applicable config key has been written. It rebuilds the agent and registry
+// via switchModel so that agent.Options and tools.NewRegistry both see the
+// updated values — the rebuild is cheap (no model download).
+func (s *chatSession) applyConfigField(ctx context.Context, key string) error {
+	switch key {
+	case "max_tool_calls":
+		s.maxToolCalls = s.settings.MaxToolCalls
+	case "num_ctx":
+		s.numCtx = s.settings.NumCtx
+	case "keep_alive":
+		s.keepAlive = s.settings.KeepAlive
+	case "max_read_bytes",
+		"max_search_file_bytes",
+		"max_search_results",
+		"max_name_results",
+		"max_batch_files",
+		"max_image_bytes",
+		"max_semantic_files",
+		"max_semantic_results",
+		"max_embed_chars",
+		"max_document_bytes":
+		s.limits = tools.Limits{
+			MaxReadBytes:       s.settings.MaxReadBytes,
+			MaxSearchFileBytes: s.settings.MaxSearchFileBytes,
+			MaxSearchResults:   s.settings.MaxSearchResults,
+			MaxNameResults:     s.settings.MaxNameResults,
+			MaxBatchFiles:      s.settings.MaxBatchFiles,
+			MaxImageBytes:      s.settings.MaxImageBytes,
+			MaxSemanticFiles:   s.settings.MaxSemanticFiles,
+			MaxSemanticResults: s.settings.MaxSemanticResults,
+			MaxEmbedChars:      s.settings.MaxEmbedChars,
+			MaxDocumentBytes:   s.settings.MaxDocumentBytes,
+		}
+	}
+	return s.switchModel(ctx, s.model)
+}
+
 // resolveModel picks the model to use: explicit flag wins, otherwise the
 // first model available on the Ollama server. Errors out if none are available.
 func resolveModel(ctx context.Context, client *ollama.Client, flagModel string, settings *config.Settings) (string, error) {
@@ -430,6 +491,10 @@ func runOnce(ctx context.Context, ag *agent.Agent, prompt string, stdout io.Writ
 	if jsonOutput {
 		return printJSONResult(stdout, result)
 	}
+	// Print citations footer in text mode.
+	if citations := extractCitations(result.ToolCalls); len(citations) > 0 {
+		fmt.Fprintf(stdout, "\n  Sources: %s\n", strings.Join(citationLinks(citations), " "))
+	}
 	return nil
 }
 
@@ -465,9 +530,10 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		promptNormal = terminal.Cyan(session.colorLevel, ">>> ")
 	}
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:       promptNormal,
-		HistoryLimit: readlineHistoryLimit,
-		HistoryFile:  "", // Empty disables readline's file persistence; we manage history ourselves
+		Prompt:        promptNormal,
+		HistoryLimit:  readlineHistoryLimit,
+		HistoryFile:   "", // Empty disables readline's file persistence; we manage history ourselves
+		AutoComplete:  &braaiCompleter{root: session.root},
 	})
 	if err != nil {
 		return fmt.Errorf("start interactive prompt: %w", err)
@@ -525,10 +591,14 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		}
 
 		if strings.HasPrefix(line, "/") {
-			// Custom prompt-template commands: /cmd [name [args...]].
-			// A named command expands to a prompt and falls through to run as a
-			// normal user turn; listing/errors are handled inside and loop.
-			if line == "/cmd" || strings.HasPrefix(line, "/cmd ") {
+			// /digest: expand to the fixed digest prompt and fall through to submit.
+			if line == "/digest" {
+				fmt.Fprintf(rl.Stdout(), "%s\n\n", terminal.Dim(session.colorLevel, digestPrompt))
+				line = digestPrompt
+			} else if line == "/cmd" || strings.HasPrefix(line, "/cmd ") {
+				// Custom prompt-template commands: /cmd [name [args...]].
+				// A named command expands to a prompt and falls through to run as a
+				// normal user turn; listing/errors are handled inside and loop.
 				expanded, run := session.expandCmd(rl.Stdout(), line, history)
 				if !run {
 					continue
@@ -541,7 +611,18 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 			}
 		}
 
-		history = append(history, ollama.Message{Role: "user", Content: line})
+		// Expand @path tokens inline before submitting to the model.
+		// expandAtTokens returns an error (and we abort the turn) if any
+		// token cannot be resolved or read. The original unexpanded line is
+		// already persisted to session.hist above, so recall history stays compact.
+		expanded, expandErr := expandAtTokens(line, session, rl.Stdout())
+		if expandErr != nil {
+			fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, expandErr.Error()))
+			rl.SetPrompt(terminal.Red(session.colorLevel, ">>> "))
+			continue
+		}
+
+		history = append(history, ollama.Message{Role: "user", Content: expanded})
 		// In text mode the answer streams straight to stdout as it arrives;
 		// in JSON mode it was buffered (Stdout was io.Discard) and is
 		// printed here instead. session.ag is re-read fresh each turn since
@@ -586,6 +667,13 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 			if err := printJSONResult(rl.Stdout(), result); err != nil {
 				fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error encoding JSON output: "+err.Error()))
 			}
+		} else {
+			// Print a dim citations footer when any file-reading tools were used.
+			if citations := extractCitations(result.ToolCalls); len(citations) > 0 {
+				links := citationLinks(citations)
+				fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Dim(session.colorLevel,
+					"  Sources: "+strings.Join(links, " ")))
+			}
 		}
 		history = result.History
 	}
@@ -605,15 +693,19 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		entries := []helpEntry{
 			{"/clear", "reset the conversation history"},
 			{"/forget-history", "erase ~/.braai/chat_history (the up/down recall history)"},
-			{"/tools", "list tools available to the model (/tools full for details)"},
-			{"/model", "show the current model and list models available on the server"},
-			{"/model <name>", "switch to a different model and save it as the default"},
-			{"/save <file>", "save the conversation transcript to a file"},
-			{"/copy", "copy the last answer to clipboard"},
-			{"/cache", "show or clear the semantic-search cache (/cache clear)"},
-			{"/cmd [name...]", "run a custom prompt template (/cmd to list them)"},
+			{"/tools [full]", "list tools available to the model (full: also show arguments)"},
+			{"/tree [hidden]", "show working directory as an ASCII tree (hidden: include dotfiles)"},
+			{"/digest", "produce a structured project overview (walks tree, reads key files)"},
+			{"/model [<name>]", "show models or switch to <name> and save as default"},
+			{"/config [<key> [<value>]]", "list / show / change settings"},
+			{"/save <file>", "save the conversation transcript to a Markdown file"},
+			{"/export json <file>", "save conversation as a JSON array"},
+			{"/copy [last]", "copy full conversation (or last answer) to clipboard"},
+			{"/cache [clear]", "show semantic-search cache stats (clear: wipe it)"},
+			{"/cmd [<name> [args...]]", "run a custom prompt template (/cmd to list)"},
+			{"@<path>", "attach a file inline; Tab-completes paths (use \\ for spaces)"},
 			{"/help", "show this message"},
-			{"/bye, exit, quit", "leave the chat (Ctrl + d, also works)"},
+			{"/bye, exit, quit", "leave the chat (Ctrl + d also works)"},
 		}
 		maxW := 0
 		for _, e := range entries {
@@ -735,6 +827,21 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		return history
 
 	case "/copy":
+		if len(fields) >= 2 && fields[1] == "last" {
+			// /copy last — copy only the most recent assistant answer.
+			last := lastAssistantMessage(history)
+			if last == "" {
+				fmt.Fprintln(out, "no answer to copy yet")
+				return history
+			}
+			if err := copyToClipboard(last); err != nil {
+				fmt.Fprintf(out, "could not copy to clipboard: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "last answer copied to clipboard")
+			}
+			return history
+		}
+		// /copy — copy the full conversation transcript.
 		transcript, err := formatTranscript(history)
 		if err != nil {
 			fmt.Fprintf(out, "could not format transcript: %v\n", err)
@@ -745,6 +852,24 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		} else {
 			fmt.Fprintln(out, "conversation copied to clipboard")
 		}
+		return history
+
+	case "/export":
+		if len(fields) < 3 || fields[1] != "json" {
+			fmt.Fprintln(out, "usage: /export json <file>")
+			return history
+		}
+		if err := saveTranscriptJSON(fields[2], history); err != nil {
+			fmt.Fprintf(out, "could not export: %v\n", err)
+		} else {
+			fmt.Fprintf(out, "exported conversation to %s\n", fields[2])
+		}
+		return history
+
+	case "/tree":
+		showHidden := len(fields) >= 2 && fields[1] == "hidden"
+		fmt.Fprintln(out, ".")
+		printTree(out, session.workingDir, "", showHidden)
 		return history
 
 	case "/cache":
@@ -763,6 +888,108 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		files, chunks, bytes := session.cache.Status()
 		fmt.Fprintf(out, "semantic cache: %d files, %d chunks, %.1f MiB (use /cache clear to wipe)\n",
 			files, chunks, float64(bytes)/(1024*1024))
+		return history
+
+	case "/config":
+		switch len(fields) {
+		case 1:
+			// /config — list all settings grouped by section.
+			var currentSection string
+			for _, def := range config.ConfigDefs {
+				if def.Section != currentSection {
+					currentSection = def.Section
+					fmt.Fprintf(out, "\n%s\n", terminal.Bold(session.colorLevel, "── "+def.Section+" "))
+				}
+				val := config.GetCurrentValue(session.settings, def.Key)
+				if val == "" {
+					val = terminal.Dim(session.colorLevel, "(unset)")
+				}
+				readonlyMark := ""
+				if def.ReadOnly {
+					readonlyMark = terminal.Dim(session.colorLevel, " (read-only)")
+				}
+				hotMark := ""
+				if !def.Hot && !def.ReadOnly {
+					hotMark = terminal.Dim(session.colorLevel, " *")
+				}
+				fmt.Fprintf(out, "  %-30s %s%s%s\n",
+					terminal.Bold(session.colorLevel, def.Key),
+					terminal.Cyan(session.colorLevel, val),
+					readonlyMark,
+					hotMark,
+				)
+			}
+			fmt.Fprintf(out, "\n%s\n", terminal.Dim(session.colorLevel, "* requires restart to take effect   |   /config <key> <value> to change"))
+
+		case 2:
+			// /config <key> — show a single key's value and description.
+			key := fields[1]
+			var found *config.ConfigDef
+			for i := range config.ConfigDefs {
+				if config.ConfigDefs[i].Key == key {
+					found = &config.ConfigDefs[i]
+					break
+				}
+			}
+			if found == nil {
+				fmt.Fprintf(out, "unknown config key %q; run /config to list all valid keys\n", key)
+				return history
+			}
+			val := config.GetCurrentValue(session.settings, key)
+			if val == "" {
+				val = "(unset)"
+			}
+			fmt.Fprintf(out, "%s = %s\n%s\n",
+				terminal.Bold(session.colorLevel, key),
+				terminal.Cyan(session.colorLevel, val),
+				terminal.Dim(session.colorLevel, found.Description),
+			)
+			if found.ReadOnly {
+				fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, "  (read-only — use /model <name> to change)"))
+			} else if !found.Hot {
+				fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, "  (* restart required for this setting to take effect)"))
+			}
+
+		default:
+			// /config <key> <value> — set a config key.
+			key := fields[1]
+			value := strings.Join(fields[2:], " ")
+
+			if err := config.SetField(session.settings, key, value); err != nil {
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, err.Error()))
+				return history
+			}
+			if err := config.Save(session.settings); err != nil {
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not save settings: "+err.Error()))
+				return history
+			}
+
+			// Find the def to decide hot vs restart-required.
+			var def *config.ConfigDef
+			for i := range config.ConfigDefs {
+				if config.ConfigDefs[i].Key == key {
+					def = &config.ConfigDefs[i]
+					break
+				}
+			}
+			if def != nil && def.Hot {
+				if err := session.applyConfigField(ctx, key); err != nil {
+					fmt.Fprintf(out, "%s\n", terminal.Yellow(session.colorLevel, "saved but could not hot-apply: "+err.Error()))
+				} else {
+					fmt.Fprintf(out, "%s = %s  %s\n",
+						terminal.Bold(session.colorLevel, key),
+						terminal.Cyan(session.colorLevel, value),
+						terminal.Green(session.colorLevel, "✓ applied"),
+					)
+				}
+			} else {
+				fmt.Fprintf(out, "%s = %s  %s\n",
+					terminal.Bold(session.colorLevel, key),
+					terminal.Cyan(session.colorLevel, value),
+					terminal.Dim(session.colorLevel, "(saved — restart required)"),
+				)
+			}
+		}
 		return history
 
 	default:
@@ -994,4 +1221,368 @@ func copyToClipboard(text string) error {
 	}
 
 	return fmt.Errorf("no clipboard utility found (tried pbcopy, xclip, xsel)")
+}
+
+// expandAtTokens scans line for @path tokens, resolves each against the
+// working-directory root, reads the file content (plain text or extracted
+// document text), and replaces each token inline with:
+//
+//	[Attached: <relpath>]
+//	<content>
+//
+// Spaces in paths are escaped with a backslash, matching the standard shell
+// convention (e.g. tab-completion on macOS produces this automatically):
+//
+//	@notes/Meeting\ Summary.md summarise this
+//
+// Unescaped spaces terminate the token, so bare @mention style text is
+// left untouched. If any token cannot be resolved or read the function
+// returns a non-nil error and the caller must abort the turn.
+// A dim confirmation line is printed for each attachment.
+func expandAtTokens(line string, session *chatSession, out io.Writer) (string, error) {
+	if !strings.ContainsRune(line, '@') {
+		return line, nil
+	}
+
+	type replacement struct {
+		token   string // the original "@some/path" token as it appears in the line
+		relPath string // the unescaped path (without leading @)
+		content string
+	}
+
+	var replacements []replacement
+	seen := map[string]bool{}
+
+	// Scan left-to-right for '@' and collect the token character by character,
+	// honouring backslash-escaped spaces so paths with spaces work naturally.
+	i := 0
+	runes := []rune(line)
+	for i < len(runes) {
+		if runes[i] != '@' {
+			i++
+			continue
+		}
+		// Consume characters after '@' until an unescaped space/tab or end-of-line.
+		j := i + 1
+		for j < len(runes) {
+			if (runes[j] == ' ' || runes[j] == '\t') && (j == 0 || runes[j-1] != '\\') {
+				break
+			}
+			j++
+		}
+		if j == i+1 {
+			// bare '@' with nothing after it — skip
+			i++
+			continue
+		}
+		token := string(runes[i:j])          // e.g. "@foo/bar\ baz.md"
+		escaped := token[1:]                  // strip leading @
+		relPath := strings.ReplaceAll(escaped, `\ `, " ") // unescape spaces
+
+		if !seen[token] {
+			seen[token] = true
+
+			if _, err := session.root.Resolve(relPath); err != nil {
+				return "", fmt.Errorf("@%s: %w", relPath, err)
+			}
+			content, err := session.registry.ReadAnyText(relPath)
+			if err != nil {
+				return "", fmt.Errorf("@%s: %w", relPath, err)
+			}
+			replacements = append(replacements, replacement{
+				token:   token,
+				relPath: relPath,
+				content: content,
+			})
+		}
+		i = j
+	}
+
+	if len(replacements) == 0 {
+		return line, nil
+	}
+
+	// Replace each token inline and print a dim confirmation.
+	result := line
+	for _, r := range replacements {
+		sizeKiB := float64(len(r.content)) / 1024
+		fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel,
+			fmt.Sprintf("  ⊕ %s (%.1f KiB)", r.relPath, sizeKiB)))
+		block := fmt.Sprintf("[Attached: %s]\n%s", r.relPath, r.content)
+		result = strings.ReplaceAll(result, r.token, block)
+	}
+	return result, nil
+}
+
+// braaiCompleter implements readline.AutoCompleter. It handles two cases:
+//   - Current word starts with "/" → complete slash-commands.
+//   - Current word starts with "@" → complete file paths in the working directory.
+type braaiCompleter struct {
+	root *security.Root
+}
+
+// slashCommands is the canonical list of completable slash-commands. Sub-command
+// variants (e.g. "/tree hidden") are not listed separately — the user types the
+// base command first, then adds sub-args by hand.
+var slashCommands = []string{
+	"/bye", "/cache", "/clear", "/cmd", "/config", "/copy",
+	"/digest", "/export", "/forget-history", "/help",
+	"/model", "/save", "/tools", "/tree",
+}
+
+// Do implements readline.AutoCompleter.
+func (c *braaiCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
+	// Find the start of the current token: scan back from pos stopping at an
+	// unescaped space/tab.
+	wordStart := pos
+	for wordStart > 0 {
+		ch := line[wordStart-1]
+		if (ch == ' ' || ch == '\t') && (wordStart < 2 || line[wordStart-2] != '\\') {
+			break
+		}
+		wordStart--
+	}
+	word := string(line[wordStart:pos])
+
+	// "/" completion — only when the word is the first token on the line.
+	if strings.HasPrefix(word, "/") && wordStart == 0 {
+		for _, cmd := range slashCommands {
+			if strings.HasPrefix(cmd, word) {
+				newLine = append(newLine, []rune(cmd[len(word):]))
+			}
+		}
+		return newLine, len(word)
+	}
+
+	// "@" completion — file paths from the working directory.
+	if !strings.HasPrefix(word, "@") {
+		return nil, 0
+	}
+
+	// Unescape "\ " → " " to get the real partial path the user has typed so far.
+	partial := strings.ReplaceAll(word[1:], `\ `, " ")
+
+	// Split into directory prefix and file-name prefix.
+	dir := filepath.Dir(partial)
+	if dir == "." {
+		dir = ""
+	}
+	base := filepath.Base(partial)
+	if partial == "" || strings.HasSuffix(partial, "/") {
+		dir = strings.TrimSuffix(partial, "/")
+		base = ""
+	}
+
+	searchDir := c.root.Abs()
+	if dir != "" {
+		searchDir = filepath.Join(searchDir, dir)
+	}
+
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil, 0
+	}
+
+	for _, e := range entries {
+		name := e.Name()
+		// Skip hidden files and known noisy dirs.
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+			continue
+		}
+		// Build the escaped candidate path to insert into the line.
+		escapedName := strings.ReplaceAll(name, " ", `\ `)
+		var candidate string
+		if dir != "" {
+			escapedDir := strings.ReplaceAll(dir, " ", `\ `)
+			candidate = escapedDir + "/" + escapedName
+		} else {
+			candidate = escapedName
+		}
+		if e.IsDir() {
+			candidate += "/"
+		}
+		// Return only the suffix readline needs to append after the current word.
+		suffix := "@" + candidate
+		newLine = append(newLine, []rune(suffix[len(word):]))
+	}
+	return newLine, len(word)
+}
+
+// citation holds one source reference extracted from a tool call.
+type citation struct {
+	relPath string // relative path as given to the tool
+	line    int    // 0 means no line info
+}
+
+// displayText returns the human-readable label: "path:line" or "path".
+func (c citation) displayText() string {
+	if c.line > 0 {
+		return fmt.Sprintf("%s:%d", c.relPath, c.line)
+	}
+	return c.relPath
+}
+
+// extractCitations walks a slice of ToolCallRecords and returns a deduplicated,
+// sorted slice of citations for every file-reading tool call made during a Run.
+func extractCitations(calls []agent.ToolCallRecord) []citation {
+	type key struct {
+		path string
+		line int
+	}
+	seen := map[key]bool{}
+	var out []citation
+
+	add := func(relPath string, line int) {
+		if relPath == "" {
+			return
+		}
+		k := key{relPath, line}
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, citation{relPath: relPath, line: line})
+	}
+
+	for _, tc := range calls {
+		switch tc.Name {
+		case "read":
+			// Single path with optional start_line.
+			if p, ok := tc.Arguments["path"].(string); ok && p != "" {
+				line := 0
+				if sl, ok := tc.Arguments["start_line"].(float64); ok {
+					line = int(sl)
+				}
+				add(p, line)
+			}
+			// Batch paths — no line info.
+			if paths, ok := tc.Arguments["paths"].([]any); ok {
+				for _, v := range paths {
+					if p, ok := v.(string); ok {
+						add(p, 0)
+					}
+				}
+			}
+
+		case "search":
+			if len(tc.Result) == 0 {
+				continue
+			}
+			var result struct {
+				Matches []struct {
+					Path string `json:"path"`
+					Line int    `json:"line"` // 0 for semantic matches
+				} `json:"matches"`
+			}
+			if err := json.Unmarshal(tc.Result, &result); err != nil {
+				continue
+			}
+			for _, m := range result.Matches {
+				add(m.Path, m.Line)
+			}
+
+		case "get_chunk", "stat_file":
+			if p, ok := tc.Arguments["path"].(string); ok && p != "" {
+				add(p, 0)
+			}
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].relPath != out[j].relPath {
+			return out[i].relPath < out[j].relPath
+		}
+		return out[i].line < out[j].line
+	})
+	return out
+}
+
+// citationLinks converts a []citation into display strings of the form
+// [path:line] or [path], each enclosed in square brackets so filenames
+// with spaces remain clearly delimited in the Sources footer.
+func citationLinks(citations []citation) []string {
+	out := make([]string, len(citations))
+	for i, c := range citations {
+		out[i] = "[" + c.displayText() + "]"
+	}
+	return out
+}
+
+// saveTranscriptJSON writes the user-visible parts of a conversation as a JSON
+// array of {role, content} objects, skipping the system message, tool-only
+// turns, and tool-role messages.
+func saveTranscriptJSON(path string, history []ollama.Message) error {
+	type jsonMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	var msgs []jsonMsg
+	for _, m := range history {
+		switch m.Role {
+		case "user":
+			msgs = append(msgs, jsonMsg{Role: "user", Content: m.Content})
+		case "assistant":
+			if m.Content == "" {
+				continue // tool-call-only turns
+			}
+			msgs = append(msgs, jsonMsg{Role: "assistant", Content: m.Content})
+		}
+	}
+	data, err := json.MarshalIndent(msgs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// printTree renders the contents of dir as an ASCII tree, writing to out.
+// prefix is the indentation string for the current level (built up recursively).
+// showHidden controls whether dotfiles/dotdirs are included; entries in the
+// skipDirNames set are always omitted regardless of showHidden.
+func printTree(out io.Writer, dir string, prefix string, showHidden bool) {
+	// Mirror the skip set from internal/tools without importing it.
+	skipNames := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true,
+		".idea": true, ".DS_Store": true,
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Fprintf(out, "%s[error reading directory: %v]\n", prefix, err)
+		return
+	}
+
+	// Filter entries.
+	var visible []os.DirEntry
+	for _, e := range entries {
+		name := e.Name()
+		if skipNames[name] {
+			continue
+		}
+		if !showHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		visible = append(visible, e)
+	}
+
+	for i, e := range visible {
+		last := i == len(visible)-1
+		connector := "├── "
+		childPrefix := prefix + "│   "
+		if last {
+			connector = "└── "
+			childPrefix = prefix + "    "
+		}
+		label := e.Name()
+		if e.IsDir() {
+			label += "/"
+		}
+		fmt.Fprintf(out, "%s%s%s\n", prefix, connector, label)
+		if e.IsDir() {
+			printTree(out, filepath.Join(dir, e.Name()), childPrefix, showHidden)
+		}
+	}
 }

@@ -15,6 +15,50 @@ Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 [0.2.0] - 2026-07-06
 ---------------------
 
+Added
+  - @path file attachments in interactive chat. Type @path/to/file anywhere in a
+    prompt to inject the file's full content inline before it reaches the model.
+    Works for all formats the read tool supports: plain text, code, PDF, Word,
+    Excel, PowerPoint, HTML, RTF. Paths with spaces are escaped with a backslash
+    (standard shell convention: @notes/Meeting\ Summary.md), which Tab completion
+    produces automatically. If the path cannot be resolved or read, the turn is
+    hard-stopped with a clear error.
+  - Tab completion for both @path tokens and /commands. Pressing Tab after @
+    (or @partial/path) completes file and directory names from the working
+    directory; directories get a trailing / so you can keep drilling down; spaces
+    in names are escaped automatically. Pressing Tab after / (or a partial
+    command like /fo) completes slash-commands (/forget-history, /config, etc.).
+  - /config command (interactive chat). View and change settings without editing
+    braai.conf by hand:
+      /config                    — list all settings with current values, grouped
+                                   by section; marks hot-applicable vs restart-
+                                   required keys.
+      /config <key>              — show a single key's current value and description.
+      /config <key> <value>      — change a setting; hot-applicable keys (all
+                                   tool limits, max_tool_calls, num_ctx,
+                                   keep_alive) take effect immediately without
+                                   restarting; other keys save to disk and note
+                                   that a restart is required.
+  - /tree [hidden] command. Renders the working directory as an ASCII tree
+    (├──, └──, │) directly in the REPL. Standard skip list (.git, node_modules,
+    vendor, .idea) is always excluded. Pass "hidden" to also show dotfiles.
+  - /digest command and --summarize flag. Submit a fixed structured-overview
+    prompt that walks the tree and reads key files to produce a project summary.
+    /digest works inside interactive chat (conversation continues afterwards);
+    --summarize runs non-interactively and exits.
+  - Answer citations (Sources: footer). After each answer that used file-reading
+    tools (read, search, get_chunk, stat_file), a dim "Sources:" line lists the
+    files and line numbers the model drew from, each enclosed in [brackets] so
+    filenames with spaces stay clearly delimited:
+      Sources: [README.md] [notes/Meeting\ Summary.md:12] [internal/agent/agent.go:143]
+    Suppressed in --output json mode and when piped/redirected.
+  - /export json <file> command. Saves the conversation as a JSON array of
+    {role, content} objects (user and assistant turns only), skipping the system
+    message and tool plumbing.
+  - /copy [last] command. /copy copies the full conversation transcript to the
+    clipboard (unchanged); /copy last copies only the most recent assistant
+    answer — useful for pasting a single response into another tool.
+
 Security
   - braai.conf now written 0600 (owner-only) instead of 0644. The config file
     contains the Ollama host URL and model name, and is now consistent with the

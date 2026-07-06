@@ -1,6 +1,9 @@
 package terminal
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ANSI SGR escape sequences used throughout the package.
 // Only applied when Level >= Basic.
@@ -115,4 +118,23 @@ func ApplyInlineCode(lv Level, s string) string {
 		remaining = remaining[close+1:]
 	}
 	return b.String()
+}
+
+// Link wraps text as an OSC 8 hyperlink pointing to url when lv >= Basic,
+// so terminals that support the protocol (iTerm2, VS Code, macOS Terminal ≥
+// Sonoma, most modern Linux terminals) render it as a clickable link.
+// When lv == None (piped/redirected output, NO_COLOR, dumb terminal) the
+// raw text is returned unchanged — no escape sequences are emitted.
+//
+// Use file:// URLs for local paths; append #L<n> for a line-number hint
+// that VS Code and some other editors will jump to:
+//
+//	terminal.Link(lv, "main.go:42", "file:///abs/path/main.go#L42")
+func Link(lv Level, text, url string) string {
+	if lv == None {
+		return text
+	}
+	// OSC 8 protocol: ESC ] 8 ; params ; uri ST  visible-text  ESC ] 8 ; ; ST
+	// ST = BEL (\a) is used here for broad compatibility.
+	return fmt.Sprintf("\x1b]8;;%s\a%s\x1b]8;;\a", url, text)
 }

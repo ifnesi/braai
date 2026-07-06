@@ -126,24 +126,66 @@ When the model produces reasoning/thinking (on models that support it), it's
 shown with bold **Thinking...** and **...done thinking.** markers so it's
 visually distinct from the final answer; pass `--hide-reasoning` to suppress it.
 
-A few slash-commands are available inside the chat:
+A few slash-commands are available inside the chat. Press **Tab** after `/` (or a partial command like `/fo`) to complete command names:
 
 | Command | Effect |
 |---|---|
 | `/help` | List available commands |
-| `/clear` | Reset the conversation history and clear the visible screen (start fresh without restarting) |
-| `/copy` | Copy the last answer to clipboard |
-| `/bye` | Exit the chat (same as `exit` or `quit`; Ctrl + d, also works) |
-| `/forget-history` | Erase `~/.braai/chat_history` (the encrypted up/down arrow recall history, separate from the conversation itself) |
-| `/tools` | List the tools currently available to the model (name + description) |
-| `/tools full` | Same as `/tools`, but also shows each tool's arguments (type, whether required, and description) |
-| `/cache` | Show semantic-search cache stats for the current directory (files, chunks, size on disk) |
-| `/cache clear` | Delete the semantic-search cache for the current directory |
-| `/model` | Show the current model and list every model available on the Ollama server |
-| `/model <name>` | Switch to a different model and save it as the default (persisted to `~/.braai/braai.conf`) |
-| `/save <file>` | Save the visible conversation (your messages + braai's answers) as Markdown |
-| `/cmd` | List all available custom prompt-template commands |
-| `/cmd <name> [args...]` | Expand and run a custom prompt template |
+| `/clear` | Reset the conversation history and clear the visible screen |
+| `/forget-history` | Erase `~/.braai/chat_history` (the encrypted up/down recall history) |
+| `/tools [full]` | List tools available to the model; `full` also shows each tool's arguments |
+| `/tree [hidden]` | Show the working directory as an ASCII tree; `hidden` includes dotfiles |
+| `/digest` | Produce a structured project overview (walks tree, reads key files) |
+| `/model [<name>]` | Show available models, or switch to `<name>` and save as default |
+| `/config [<key> [<value>]]` | List all settings / show one / change one |
+| `/save <file>` | Save the conversation transcript as Markdown |
+| `/export json <file>` | Save the conversation as a JSON array `[{role, content}]` |
+| `/copy [last]` | Copy full conversation to clipboard; `last` copies only the most recent answer |
+| `/cache [clear]` | Show semantic-search cache stats; `clear` wipes the current directory's cache |
+| `/cmd [<name> [args...]]` | Run a custom prompt template; no args lists available commands |
+| `/bye` | Exit the chat (same as `exit`, `quit`, or Ctrl + d) |
+
+### File attachments with `@path`
+
+Type `@path/to/file` anywhere in your prompt to attach a file's content directly
+into the turn — the model receives the full text inline, with no tool call needed:
+
+```
+>>> @README.md summarise the key features
+>>> what are the differences between @old/spec.md and @new/spec.md?
+```
+
+All formats supported by `read` work: plain text, code, PDF, Word, Excel,
+PowerPoint, HTML, RTF. A dim `⊕ filename (4.2 KiB)` confirmation is printed
+for each attachment before the spinner starts.
+
+**Paths with spaces** use the standard shell backslash-escape convention:
+
+```
+>>> @FDSS\ -\ Follow-up\ call/notes/Meeting\ Summary.md what were the action items?
+```
+
+Press **Tab** after `@` (or after a partial path like `@notes/`) to complete
+file and directory names from the working directory. Directory completions get
+a trailing `/` so you can keep drilling down. Spaces in names are automatically
+escaped in the completion output — you don't need to type them manually.
+
+If the path cannot be resolved or the file cannot be read, the turn is
+hard-stopped with a red error and not submitted. Fix the path and try again.
+
+### Answer citations
+
+After each answer that used file-reading tools, braai prints a dim `Sources:`
+footer listing every file (and line number, when available) the model drew from.
+Each entry is enclosed in `[…]` brackets so paths with spaces stay clearly
+delimited:
+
+```
+  Sources: [README.md] [notes/Meeting Summary.md:12] [internal/agent/agent.go:143]
+```
+
+Citations are suppressed in `--output json` mode and when stdout is piped or
+redirected.
 
 If the conversation is getting close to the model's context window, braai
 prints a yellow warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
@@ -175,6 +217,7 @@ restarting with a different `--model` flag.
 | `--hide-reasoning` | `false` | Don't stream the model's reasoning/thinking trace (shown by default, on models that support it) before its answer |
 | `--max-tool-calls` | `100` | Max tool calls allowed per request before aborting |
 | `--max-read-bytes` | `-1` (no limit) | Max bytes `read_file` will return |
+| `--summarize` | `false` | Produce a structured project overview and exit (walks the tree, reads key files) |
 | `--version` | — | Print the braai version and exit |
 | `--output` | `text` | `text` streams the answer as produced; `json` buffers and prints one JSON object per answer (`answer`, `reasoning`, `tool_calls`) |
 

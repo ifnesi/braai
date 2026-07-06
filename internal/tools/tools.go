@@ -50,7 +50,7 @@ type Limits struct {
 	// MaxBatchFiles caps how many files a single read call with paths may read.
 	MaxBatchFiles int
 	// MaxDocumentBytes caps extracted text per document in a batch read
-	// (readAnyText). 0 = a built-in default is used.
+	// (ReadAnyText). 0 = a built-in default is used.
 	MaxDocumentBytes int
 	// MaxImageBytes caps the on-disk size of an image read_image will accept,
 	// since the whole file is base64-encoded and sent to the model.

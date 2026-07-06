@@ -12,10 +12,11 @@ import (
 )
 
 // hfRevision is the pinned Hugging Face commit SHA for the embedding model.
-// TODO: replace "main" with the exact immutable commit SHA to protect against
-// model changes on Hugging Face. To find the SHA, visit the model page and
-// copy the commit hash from the "Files and versions" section.
-const hfRevision = "main"
+// Pinned to a specific commit to guarantee reproducible downloads regardless
+// of future pushes to the main branch of the model repository.
+// To update: visit https://huggingface.co/minishlab/potion-retrieval-32M/tree/main
+// and copy the commit hash from the "Files and versions" section.
+const hfRevision = "6fc8051fab2a1e0ee76689cf08c853792ac285e7"
 
 // EnsureModel downloads tokenizer.json, model.safetensors and (best-effort)
 // config.json for a Hugging Face repo into cacheDir on first use, and returns

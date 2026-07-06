@@ -12,6 +12,85 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.2.0] - 2026-07-06
+---------------------
+
+Security
+  - braai.conf now written 0600 (owner-only) instead of 0644. The config file
+    contains the Ollama host URL and model name, and is now consistent with the
+    0700 directory and 0600 permissions applied to the cache key, chat history,
+    and all other sensitive files braai manages.
+  - Embedding model download pinned to an immutable Hugging Face commit SHA
+    (6fc8051fab2a1e0ee76689cf08c853792ac285e7) instead of the mutable "main"
+    branch. Prevents a silent model swap if the upstream repo is updated.
+
+Fixed
+  - search() files_inspected counter now counts every file that passes the
+    size/readability check, not only files that passed the binary-content sniff.
+    The JSON field is renamed from files_scanned to files_inspected to reflect
+    the corrected semantics.
+  - list_dir name_contains filter no longer hides parent directory entries from
+    results. Directories are now always emitted so that matching files have
+    visible parent paths in the listing (previously they appeared as orphaned
+    entries without a parent directory row).
+  - Signal-handler goroutine in interactive chat is now always unblocked via
+    defer close(turnDone), preventing a theoretical goroutine leak on panic.
+  - Unconditional trailing newline after each answer: finish() in the stream
+    printer now always emits a newline, so the >>> prompt never appears on the
+    same line as residual output when a model returns an empty answer.
+
+Changed
+  - Interactive chat spinner now shows a text label: "Thinking…" on the first
+    turn, "Reasoning…" while the model processes a tool result. The label is
+    updated dynamically for each round-trip.
+  - Each tool call is now printed as a compact one-liner (⚙ tool_name) even in
+    non-verbose mode, so users can see what the agent is doing in real time
+    without enabling --verbose.
+  - Ctrl-C during a stream now prints "^C  (interrupted)" in dim text instead of
+    a bare newline, confirming the cancellation was received.
+  - Context-window warning is now styled in yellow for better visibility.
+  - Welcome banner now uses colour: bold version, cyan working directory, green
+    model name, dim hint line. Degrades cleanly when colour is disabled.
+  - Interactive >>> prompt is cyan; turns red after an agent error and resets on
+    the next successful turn.
+  - /help command widths are now computed dynamically from the longest command
+    name, so alignment never breaks if a command name is added or changed.
+  - /clear now mirrors the compact banner (model + working directory) after
+    clearing, so users know which model is still active.
+  - /model list now marks the active model with a bold green ✓ and dims the
+    others, replacing the bare "* " marker.
+  - Embedding model download now shows a "Downloading embedding model…" spinner
+    on stderr during the first-run download, replacing the previous silent hang.
+  - Error messages in interactive chat no longer carry a redundant "error: "
+    prefix; the red colour already signals failure.
+  - "Thinking..." / "...done thinking." labels extracted to named constants in
+    stream.go (labelThinking, labelDoneThinking).
+
+Removed
+  - Dead config.Path() redirect (deprecated alias for ConfPath()) deleted.
+  - Legacy string-keyed dispatcher cases for old tool names (read_file,
+    read_files, read_document, search_name, search_content, search_document,
+    search_semantic) removed from Registry.Call(). These were unreachable from
+    normal use because the model is never given schemas with those names;
+    internal helpers remain and are called through the read/search facades.
+  - All dead *Definition() schema-builder functions (readFileDefinition,
+    readFilesDefinition, readDocumentDefinition, searchNameDefinition,
+    searchContentDefinition, searchDocumentDefinition, searchSemanticDefinition)
+    removed. The model-visible tool set is unchanged.
+  - errStopWalk sentinel moved from its own walk.go file into search_content.go
+    where it is used; walk.go deleted.
+
+Performance
+  - config.Dir(), CacheDir(), and ModelsDir() now skip the os.Chmod syscall when
+    directory permissions are already 0700, avoiding redundant syscalls on every
+    invocation.
+  - dirEntryInfo struct no longer carries an unexported modTime sort-key field;
+    sorting uses a separate (entry, modTime) pair slice that is stripped before
+    JSON marshalling.
+  - newChatSession() now takes a chatSessionOptions struct instead of 14
+    positional arguments, preventing silent argument mis-ordering bugs.
+
+
 [0.1.3] - 2026-07-05
 ---------------------
 

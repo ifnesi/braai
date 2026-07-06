@@ -5,47 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"braai/internal/ollama"
 	"braai/internal/textextract"
 )
-
-func searchDocumentDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name: "search_document",
-			Description: `Semantically search within a document to find the most relevant chunks.
-
-First call read_document(path) to extract the document and get a manifest if needed. Then use this tool to search for specific topics by natural-language query. Returns the top matching chunks ranked by relevance.
-
-Example: search_document("manual.pdf", "authentication setup") returns the 3-5 most relevant chunks about authentication.`,
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path": map[string]any{
-						"type":        "string",
-						"description": "Path to the document, relative to the working directory root.",
-					},
-					"query": map[string]any{
-						"type":        "string",
-						"description": "Natural-language description of what you're looking for (e.g., 'security requirements', 'how to configure LDAP').",
-					},
-					"top_k": map[string]any{
-						"type":        "integer",
-						"description": "Number of top chunks to return (default 5, max 10).",
-						"default":     5,
-					},
-					"threshold": map[string]any{
-						"type":        "number",
-						"description": "Minimum similarity score (0-1) to include a chunk in results (default 0.3, meaning weak matches are excluded).",
-						"default":     0.3,
-					},
-				},
-				"required": []string{"path", "query"},
-			},
-		},
-	}
-}
 
 type searchDocumentResult struct {
 	Query   string                    `json:"query"`

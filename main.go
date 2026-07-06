@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.1.3"
+const version = "0.2.0"
 
 // defaultEmbedModel is the Hugging Face repo of the static embedding model braai
 // downloads and runs in-process (no Ollama needed for embeddings).
@@ -174,7 +174,12 @@ Flags:
 	// search reports a clear "unavailable" error instead of crashing.
 	var embedModelObj *staticembed.Model
 	if modelsDir, mdErr := config.ModelsDir(); mdErr == nil {
-		if dir, dErr := staticembed.EnsureModel(ctx, resolvedEmbedModel, modelsDir); dErr == nil {
+		dlSpinner := terminal.NewSpinner(stderr, terminal.Detect(stderr))
+		dlSpinner.SetLabel("Downloading embedding model…")
+		dlSpinner.Start()
+		dir, dErr := staticembed.EnsureModel(ctx, resolvedEmbedModel, modelsDir)
+		dlSpinner.Stop()
+		if dErr == nil {
 			if m, lErr := staticembed.Load(dir); lErr == nil {
 				embedModelObj = m
 			} else {
@@ -234,7 +239,22 @@ Flags:
 		colorLevel = terminal.None
 	}
 
-	session := newChatSession(client, root, limits, settings, resolvedEmbedModel, embedModelObj, resolvedMaxToolCalls, *verbose, !*hideReasoning, dir, agentStdout, colorLevel, stderr, semanticCache)
+	session := newChatSession(chatSessionOptions{
+		client:        client,
+		root:          root,
+		limits:        limits,
+		settings:      settings,
+		embedModel:    resolvedEmbedModel,
+		embedder:      embedModelObj,
+		maxToolCalls:  resolvedMaxToolCalls,
+		verbose:       *verbose,
+		showReasoning: !*hideReasoning,
+		workingDir:    dir,
+		stdout:        agentStdout,
+		colorLevel:    colorLevel,
+		verboseWriter: stderr,
+		semanticCache: semanticCache,
+	})
 	if err := session.switchModel(ctx, selectedModel); err != nil {
 		return err
 	}
@@ -256,6 +276,26 @@ Flags:
 	}
 
 	return runChat(ctx, session, jsonOutput)
+}
+
+// chatSessionOptions holds all construction-time options for newChatSession,
+// replacing the previous 14-positional-arg signature to prevent silent
+// mis-ordering of same-typed arguments.
+type chatSessionOptions struct {
+	client        *ollama.Client
+	root          *security.Root
+	limits        tools.Limits
+	settings      *config.Settings
+	embedModel    string
+	embedder      *staticembed.Model
+	maxToolCalls  int
+	verbose       bool
+	showReasoning bool
+	workingDir    string
+	stdout        io.Writer
+	colorLevel    terminal.Level
+	verboseWriter io.Writer
+	semanticCache *cache.Cache
 }
 
 // chatSession bundles everything needed to (re)build an agent for a given
@@ -287,24 +327,24 @@ type chatSession struct {
 	hist      *history.Store
 }
 
-func newChatSession(client *ollama.Client, root *security.Root, limits tools.Limits, settings *config.Settings, embedModel string, embedder *staticembed.Model, maxToolCalls int, verbose, showReasoning bool, workingDir string, stdout io.Writer, colorLevel terminal.Level, verboseWriter io.Writer, semanticCache *cache.Cache) *chatSession {
+func newChatSession(opts chatSessionOptions) *chatSession {
 	return &chatSession{
-		client:        client,
-		root:          root,
-		limits:        limits,
-		settings:      settings,
-		embedModel:    embedModel,
-		embedder:      embedder,
-		maxToolCalls:  maxToolCalls,
-		numCtx:        settings.NumCtx,
-		keepAlive:     settings.KeepAlive,
-		verbose:       verbose,
-		showReasoning: showReasoning,
-		workingDir:    workingDir,
-		stdout:        stdout,
-		colorLevel:    colorLevel,
-		verboseWriter: verboseWriter,
-		cache:         semanticCache,
+		client:        opts.client,
+		root:          opts.root,
+		limits:        opts.limits,
+		settings:      opts.settings,
+		embedModel:    opts.embedModel,
+		embedder:      opts.embedder,
+		maxToolCalls:  opts.maxToolCalls,
+		numCtx:        opts.settings.NumCtx,
+		keepAlive:     opts.settings.KeepAlive,
+		verbose:       opts.verbose,
+		showReasoning: opts.showReasoning,
+		workingDir:    opts.workingDir,
+		stdout:        opts.stdout,
+		colorLevel:    opts.colorLevel,
+		verboseWriter: opts.verboseWriter,
+		cache:         opts.semanticCache,
 	}
 }
 
@@ -420,8 +460,12 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	// limit shouldn't crop our entries during the session.
 	readlineHistoryLimit := historyLimit * 10
 
+	promptNormal := ">>> "
+	if session.colorLevel != terminal.None {
+		promptNormal = terminal.Cyan(session.colorLevel, ">>> ")
+	}
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:       ">>> ",
+		Prompt:       promptNormal,
 		HistoryLimit: readlineHistoryLimit,
 		HistoryFile:  "", // Empty disables readline's file persistence; we manage history ourselves
 	})
@@ -444,10 +488,15 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		fmt.Fprintf(os.Stderr, "warning: could not open encrypted chat history: %v\n", herr)
 	}
 
-	fmt.Fprintf(rl.Stdout(), "braai %s\nWorking Directory %s\nInteractive chat using model %s.\n\nUse Ctrl + d or /bye to exit, or /help for commands.\n", version, session.workingDir, session.model)
+	fmt.Fprintf(rl.Stdout(), "%s %s\n%s %s\n%s %s\n\n%s\n",
+		terminal.Bold(session.colorLevel, "braai"), terminal.Bold(session.colorLevel, version),
+		"Working directory:", terminal.Cyan(session.colorLevel, session.workingDir),
+		"Model:", terminal.Green(session.colorLevel, session.model),
+		terminal.Dim(session.colorLevel, "Use Ctrl + d or /bye to exit, or /help for commands."))
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
+		rl.SetPrompt(promptNormal) // reset to normal after any previous error
 		line, err := rl.Readline()
 		if errors.Is(err, readline.ErrInterrupt) {
 			// Ctrl-C: reset any open ANSI styling (e.g. dim codes from thinking),
@@ -506,6 +555,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT)
 		turnDone := make(chan struct{})
+		defer close(turnDone) // always unblock watcher goroutine, even on panic
 		go func() {
 			select {
 			case <-sigChan:
@@ -517,7 +567,6 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 
 		result, err := session.ag.Run(runCtx, history)
 		signal.Stop(sigChan)
-		close(turnDone) // unblock the watcher goroutine
 		cancel()
 
 		if err != nil {
@@ -526,10 +575,11 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 				// Context cancelled by Ctrl-C: reset terminal styling that was open
 				// during agent execution (e.g. dim codes from thinking output).
 				fmt.Fprint(rl.Stdout(), terminal.Reset(session.colorLevel))
-				fmt.Fprintf(rl.Stdout(), "\n")
+				fmt.Fprintln(rl.Stdout(), terminal.Dim(session.colorLevel, "^C  (interrupted)"))
 				continue
 			}
-			fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error: "+err.Error()))
+			fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, err.Error()))
+			rl.SetPrompt(terminal.Red(session.colorLevel, ">>> "))
 			continue
 		}
 		if jsonOutput {
@@ -551,18 +601,31 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 
 	switch cmd {
 	case "/help":
+		type helpEntry struct{ cmd, desc string }
+		entries := []helpEntry{
+			{"/clear", "reset the conversation history"},
+			{"/forget-history", "erase ~/.braai/chat_history (the up/down recall history)"},
+			{"/tools", "list tools available to the model (/tools full for details)"},
+			{"/model", "show the current model and list models available on the server"},
+			{"/model <name>", "switch to a different model and save it as the default"},
+			{"/save <file>", "save the conversation transcript to a file"},
+			{"/copy", "copy the last answer to clipboard"},
+			{"/cache", "show or clear the semantic-search cache (/cache clear)"},
+			{"/cmd [name...]", "run a custom prompt template (/cmd to list them)"},
+			{"/help", "show this message"},
+			{"/bye, exit, quit", "leave the chat (Ctrl + d, also works)"},
+		}
+		maxW := 0
+		for _, e := range entries {
+			if len(e.cmd) > maxW {
+				maxW = len(e.cmd)
+			}
+		}
 		fmt.Fprintln(out, "Commands:")
-		fmt.Fprintf(out, "  %s%s reset the conversation history\n", terminal.Bold(session.colorLevel, "/clear"), strings.Repeat(" ", 18-len("/clear")))
-		fmt.Fprintf(out, "  %s%s erase ~/.braai/chat_history (the up/down recall history)\n", terminal.Bold(session.colorLevel, "/forget-history"), strings.Repeat(" ", 18-len("/forget-history")))
-		fmt.Fprintf(out, "  %s%s list tools available to the model (/tools full for details)\n", terminal.Bold(session.colorLevel, "/tools"), strings.Repeat(" ", 18-len("/tools")))
-		fmt.Fprintf(out, "  %s%s show the current model and list models available on the server\n", terminal.Bold(session.colorLevel, "/model"), strings.Repeat(" ", 18-len("/model")))
-		fmt.Fprintf(out, "  %s%s switch to a different model and save it as the default\n", terminal.Bold(session.colorLevel, "/model <name>"), strings.Repeat(" ", 18-len("/model <name>")))
-		fmt.Fprintf(out, "  %s%s save the conversation transcript to a file\n", terminal.Bold(session.colorLevel, "/save <file>"), strings.Repeat(" ", 18-len("/save <file>")))
-		fmt.Fprintf(out, "  %s%s copy the last answer to clipboard\n", terminal.Bold(session.colorLevel, "/copy"), strings.Repeat(" ", 18-len("/copy")))
-		fmt.Fprintf(out, "  %s%s show or clear the semantic-search cache (/cache clear)\n", terminal.Bold(session.colorLevel, "/cache"), strings.Repeat(" ", 18-len("/cache")))
-		fmt.Fprintf(out, "  %s%s run a custom prompt template (/cmd to list them)\n", terminal.Bold(session.colorLevel, "/cmd [name...]"), strings.Repeat(" ", 18-len("/cmd [name...]")))
-		fmt.Fprintf(out, "  %s%s show this message\n", terminal.Bold(session.colorLevel, "/help"), strings.Repeat(" ", 18-len("/help")))
-		fmt.Fprintf(out, "  %s%s leave the chat (Ctrl + d, also works)\n", terminal.Bold(session.colorLevel, "/bye, exit, quit"), strings.Repeat(" ", 18-len("/bye, exit, quit")))
+		for _, e := range entries {
+			pad := strings.Repeat(" ", maxW-len(e.cmd)+2)
+			fmt.Fprintf(out, "  %s%s%s\n", terminal.Bold(session.colorLevel, e.cmd), pad, e.desc)
+		}
 		return history
 
 	case "/clear":
@@ -575,6 +638,10 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 			fmt.Fprint(out, "\x1b[2J\x1b[H")
 		}
 		fmt.Fprintln(out, "Conversation history cleared.")
+		// Mirror the startup banner so the user knows which model is active.
+		fmt.Fprintf(out, "%s %s\n%s %s\n\n",
+			"Model:", terminal.Green(session.colorLevel, session.model),
+			"Working directory:", terminal.Cyan(session.colorLevel, session.workingDir))
 		return []ollama.Message{agent.SystemMessage()}
 
 	case "/forget-history":
@@ -616,14 +683,18 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		}
 
 		if len(fields) == 1 {
-			fmt.Fprintf(out, "Current model: %s\n", session.model)
+			fmt.Fprintf(out, "Current model: %s\n", terminal.Bold(session.colorLevel, session.model))
 			fmt.Fprintln(out, "Available models:")
 			for _, m := range available {
-				marker := "  "
 				if m == session.model {
-					marker = "* "
+					fmt.Fprintf(out, "  %s %s\n",
+						terminal.Green(session.colorLevel, "✓"),
+						terminal.Bold(session.colorLevel, m))
+				} else {
+					fmt.Fprintf(out, "  %s %s\n",
+						terminal.Dim(session.colorLevel, " "),
+						terminal.Dim(session.colorLevel, m))
 				}
-				fmt.Fprintf(out, "%s%s\n", marker, m)
 			}
 			return history
 		}

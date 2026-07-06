@@ -3,36 +3,15 @@ package tools
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"braai/internal/ollama"
 )
 
-func searchContentDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name:        "search_content",
-			Description: "Search the text contents of files under the working directory for a plain-text query. Returns matching file paths, line numbers, and excerpts. Binary and very large files are skipped.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{
-						"type":        "string",
-						"description": "Plain text substring to search for within file contents.",
-					},
-					"case_sensitive": map[string]any{
-						"type":        "boolean",
-						"description": "If true, match case-sensitively. Default false.",
-					},
-				},
-				"required": []string{"query"},
-			},
-		},
-	}
-}
+// errStopWalk is a sentinel used internally to break out of filepath.WalkDir
+// once a result limit has been reached; it is never surfaced to callers.
+var errStopWalk = errors.New("stop walk: limit reached")
 
 type contentMatch struct {
 	Path    string `json:"path"`
@@ -53,7 +32,7 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 	}
 
 	var matches []contentMatch
-	filesScanned := 0
+	filesInspected := 0
 
 	walkErr := filepath.WalkDir(r.root.Abs(), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -74,11 +53,11 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 			return nil // skip large or unreadable files
 		}
 
+		filesInspected++
 		found, isText, scanErr := scanFileForMatches(path, needle, caseSensitive, r.limits.MaxSearchResults-len(matches))
 		if scanErr != nil || !isText {
 			return nil
 		}
-		filesScanned++
 		for _, m := range found {
 			m.Path = r.root.RelPath(path)
 			matches = append(matches, m)
@@ -94,10 +73,10 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 
 	truncated := len(matches) >= r.limits.MaxSearchResults
 	out, jsonErr := json.Marshal(struct {
-		Matches      []contentMatch `json:"matches"`
-		FilesScanned int            `json:"files_scanned"`
-		Truncated    bool           `json:"truncated,omitempty"`
-	}{Matches: matches, FilesScanned: filesScanned, Truncated: truncated})
+		Matches        []contentMatch `json:"matches"`
+		FilesInspected int            `json:"files_inspected"`
+		Truncated      bool           `json:"truncated,omitempty"`
+	}{Matches: matches, FilesInspected: filesInspected, Truncated: truncated})
 	if jsonErr != nil {
 		return Result{}, jsonErr
 	}

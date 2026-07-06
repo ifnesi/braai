@@ -9,6 +9,11 @@ import (
 	"braai/internal/terminal"
 )
 
+const (
+	labelThinking     = "Thinking..."
+	labelDoneThinking = "...done thinking."
+)
+
 // streamPrinter writes a model's streamed thinking/content deltas to an
 // output writer as they arrive, labeling the reasoning section so it isn't
 // confused with the final answer, and (when colorLevel > None) applying
@@ -52,13 +57,13 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 	if p.showReason && chunk.Message.Thinking != "" {
 		p.stopSpinner()
 		if !p.inThinking {
-			// Print empty line before thinking, then "Thinking..." in bold+dim
+			// Print empty line before thinking, then label in bold+dim
 			fmt.Fprintln(p.out)
 			if p.colorLevel == terminal.None {
-				fmt.Fprintln(p.out, "Thinking...")
+				fmt.Fprintln(p.out, labelThinking)
 			} else {
 				fmt.Fprint(p.out, "\x1b[1;2m") // bold + dim
-				fmt.Fprintln(p.out, "Thinking...")
+				fmt.Fprintln(p.out, labelThinking)
 				fmt.Fprint(p.out, "\x1b[0m") // reset
 			}
 			// Open a dim region that will span all reasoning chunks.
@@ -74,13 +79,13 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 		if p.inThinking {
 			// Close the dim region opened for reasoning.
 			fmt.Fprint(p.out, terminal.Reset(p.colorLevel))
-			// Print "...done thinking." in bold+dim
+			// Print done-thinking label in bold+dim
 			fmt.Fprintln(p.out)
 			if p.colorLevel == terminal.None {
-				fmt.Fprintln(p.out, "...done thinking.")
+				fmt.Fprintln(p.out, labelDoneThinking)
 			} else {
 				fmt.Fprint(p.out, "\x1b[1;2m") // bold + dim
-				fmt.Fprintln(p.out, "...done thinking.")
+				fmt.Fprintln(p.out, labelDoneThinking)
 				fmt.Fprint(p.out, "\x1b[0m") // reset
 			}
 			fmt.Fprintln(p.out)
@@ -185,7 +190,7 @@ func (p *streamPrinter) finish() {
 		p.trailingBacktick = ""
 	}
 
-	if p.printedAny {
-		fmt.Fprintln(p.out)
-	}
+	// Always emit a trailing newline so the next prompt never appears on the
+	// same line as residual output (e.g. when the model returns an empty answer).
+	fmt.Fprintln(p.out)
 }

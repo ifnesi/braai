@@ -5,38 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"braai/internal/ollama"
 )
-
-func searchNameDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name:        "search_name",
-			Description: "Search file and directory names under the working directory for a substring match. Case-insensitive by default.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"pattern": map[string]any{
-						"type":        "string",
-						"description": "Substring to search for in file/directory names.",
-					},
-					"case_sensitive": map[string]any{
-						"type":        "boolean",
-						"description": "If true, match case-sensitively. Default false.",
-					},
-					"extensions": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "File extensions to restrict matches to, e.g. [\".md\", \".txt\"]. Include the leading dot; case-insensitive. ALWAYS set this when the user restricts to specific file types so results are narrowed by the tool rather than after the fact. Directories are always eligible regardless of this filter.",
-					},
-				},
-				"required": []string{"pattern"},
-			},
-		},
-	}
-}
 
 func (r *Registry) searchName(args map[string]any) (Result, error) {
 	pattern, err := stringArg(args, "pattern")

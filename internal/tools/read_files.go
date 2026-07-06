@@ -3,30 +3,7 @@ package tools
 import (
 	"fmt"
 	"strings"
-
-	"braai/internal/ollama"
 )
-
-func readFilesDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name:        "read_files",
-			Description: "Read several text files within the working directory in one call, e.g. to summarize a batch of meeting notes or transcripts. Each file is subject to the same binary-refusal and truncation rules as read_file. Prefer this over multiple read_file calls when you already know which files you need.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"paths": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "Paths relative to the working directory root.",
-					},
-				},
-				"required": []string{"paths"},
-			},
-		},
-	}
-}
 
 func (r *Registry) readFiles(args map[string]any) (Result, error) {
 	paths := stringSliceArg(args, "paths")

@@ -177,24 +177,10 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return r.listDir(args)
 	case "read":
 		return r.read(args)
-	case "read_file":
-		return r.readFile(args)
-	case "read_files":
-		return r.readFiles(args)
-	case "read_document":
-		return r.readDocument(args)
 	case "read_image":
 		return r.readImage(args)
-	case "search_name":
-		return r.searchName(args)
 	case "search":
 		return r.search(ctx, args)
-	case "search_content":
-		return r.searchContent(args)
-	case "search_document":
-		return r.searchDocument(ctx, args)
-	case "search_semantic":
-		return r.searchSemantic(ctx, args)
 	case "stat_file":
 		return r.statFile(args)
 	case "get_chunk":

@@ -105,14 +105,22 @@ JSON object per answer once it's complete:
 omitted if the model answered without using any tools. This works in both
 one-shot and interactive chat mode (one JSON object per turn).
 
-The interactive chat uses a `>>>` prompt and supports standard readline-style
-line editing: left/right arrows to move within the line, Ctrl-A/Ctrl-E to
-jump to the start/end, Ctrl-C to clear the current input (shows a hint to exit
-via Ctrl + d or `/bye`), and up/down arrows to recall history from previous
-sessions. Chat history is persisted to `~/.braai/chat_history` **encrypted at rest**
-with AES-256-GCM (using the machine-local key at `~/.braai/cache.key`), so no
-plaintext prompts are written to disk. The history limit is configured in
-`~/.braai/braai.conf` via `history_limit` (default: 100 entries).
+The interactive chat uses a cyan `>>>` prompt (plain `>>>` in no-colour
+terminals) and supports standard readline-style line editing: left/right arrows
+to move within the line, Ctrl-A/Ctrl-E to jump to the start/end, Ctrl-C to
+interrupt an in-progress response (prints `^C  (interrupted)`) or clear the
+current input line (shows a hint to exit via Ctrl + d or `/bye`), and up/down
+arrows to recall history from previous sessions. The prompt turns red after an
+agent error and resets on the next turn. Chat history is persisted to
+`~/.braai/chat_history` **encrypted at rest** with AES-256-GCM (using the
+machine-local key at `~/.braai/cache.key`), so no plaintext prompts are written
+to disk. The history limit is configured in `~/.braai/braai.conf` via
+`history_limit` (default: 100 entries).
+
+While the model is working, an animated spinner with a label is shown: **Thinking…**
+on the first turn, **Reasoning…** while it processes a tool result. Each tool the
+model calls is printed as a compact `⚙ tool_name` line so you can see what the
+agent is doing in real time without enabling `--verbose`.
 
 When the model produces reasoning/thinking (on models that support it), it's
 shown with bold **Thinking...** and **...done thinking.** markers so it's
@@ -138,7 +146,7 @@ A few slash-commands are available inside the chat:
 | `/cmd <name> [args...]` | Expand and run a custom prompt template |
 
 If the conversation is getting close to the model's context window, braai
-prints a warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
+prints a yellow warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
 estimated 131072-token context window...`) suggesting `/clear`, a shorter
 prompt, or reading fewer files at once. This is based on a rough
 character-count estimate, not the model's actual tokenizer, so treat it as a
@@ -442,9 +450,11 @@ installed, and a clipboard utility such as `pbcopy`/`xclip`/`xsel` for the
 **Cache and history files.** The semantic cache and chat history can contain
 readable text from your documents or chat prompts, so braai protects both:
 
-- `~/.braai/cache/` and `~/.braai/models/` are created owner-only (`0700`).
-- The cache index, all cache blobs, chat history file, and the encryption key
-  (`~/.braai/cache.key`) are written owner-only (`0600`).
+- `~/.braai/` and its subdirectories (`cache/`, `models/`) are created
+  owner-only (`0700`).
+- The config file (`braai.conf`), cache index, all cache blobs, chat history
+  file, and the encryption key (`~/.braai/cache.key`) are all written
+  owner-only (`0600`).
 - Both cached document text and chat history are compressed (cache only) and
   AES-256-GCM-encrypted at rest by default, using the same machine-local key.
   This protects both if they're copied off the machine (e.g. into backups or a

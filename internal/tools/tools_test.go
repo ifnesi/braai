@@ -149,7 +149,7 @@ func TestListDirSortByModifiedTime(t *testing.T) {
 
 func TestReadFileRefusesBinary(t *testing.T) {
 	r := setupRegistry(t, false)
-	_, err := call(t, r, "read_file", map[string]any{"path": "binary.bin"})
+	_, err := call(t, r, "read", map[string]any{"path": "binary.bin"})
 	if err == nil {
 		t.Fatal("expected error reading binary file")
 	}
@@ -157,7 +157,7 @@ func TestReadFileRefusesBinary(t *testing.T) {
 
 func TestReadFileReturnsContent(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "read_file", map[string]any{"path": "sub/file.txt"})
+	out, err := call(t, r, "read", map[string]any{"path": "sub/file.txt"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestReadFileReturnsContent(t *testing.T) {
 
 func TestReadFileRejectsTraversal(t *testing.T) {
 	r := setupRegistry(t, false)
-	_, err := call(t, r, "read_file", map[string]any{"path": "../../etc/passwd"})
+	_, err := call(t, r, "read", map[string]any{"path": "../../etc/passwd"})
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
@@ -176,7 +176,7 @@ func TestReadFileRejectsTraversal(t *testing.T) {
 
 func TestReadFilesBatch(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "read_files", map[string]any{"paths": []any{"sub/file.txt", "top.txt"}})
+	out, err := call(t, r, "read", map[string]any{"paths": []any{"sub/file.txt", "top.txt"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestReadFilesBatch(t *testing.T) {
 
 func TestReadFilesBatchReportsPerFileErrors(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "read_files", map[string]any{"paths": []any{"top.txt", "does-not-exist.txt"}})
+	out, err := call(t, r, "read", map[string]any{"paths": []any{"top.txt", "does-not-exist.txt"}})
 	if err != nil {
 		t.Fatalf("unexpected top-level error: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestReadFilesBatchRejectsTooMany(t *testing.T) {
 	for i := range paths {
 		paths[i] = "top.txt"
 	}
-	_, err := call(t, r, "read_files", map[string]any{"paths": paths})
+	_, err := call(t, r, "read", map[string]any{"paths": paths})
 	if err == nil {
 		t.Fatal("expected error for exceeding max batch files")
 	}
@@ -240,7 +240,7 @@ func TestReadImageRejectsNonImageExtension(t *testing.T) {
 
 func TestSearchName(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "search_name", map[string]any{"pattern": "FILE"})
+	out, err := call(t, r, "list_dir", map[string]any{"path": ".", "name_contains": "file", "depth": 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestSearchName(t *testing.T) {
 
 func TestSearchNameExtensionFilter(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "search_name", map[string]any{"pattern": "e", "extensions": []any{".md"}})
+	out, err := call(t, r, "list_dir", map[string]any{"path": ".", "name_contains": "e", "extensions": []any{".md"}, "depth": 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestSearchNameExtensionFilter(t *testing.T) {
 
 func TestSearchContent(t *testing.T) {
 	r := setupRegistry(t, false)
-	out, err := call(t, r, "search_content", map[string]any{"query": "kafka"})
+	out, err := call(t, r, "search", map[string]any{"query": "kafka"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestSearchContentExcerptDoesNotSplitMultiByteRune(t *testing.T) {
 	must(t, err)
 	r := NewRegistry(root, DefaultLimits(), false, &fakeEmbedder{}, "fake-embed-model")
 
-	out, err := call(t, r, "search_content", map[string]any{"query": "target"})
+	out, err := call(t, r, "search", map[string]any{"query": "target"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestSearchSemanticRequiresEmbedClient(t *testing.T) {
 	must(t, err)
 	r := NewRegistry(root, DefaultLimits(), false, nil, "")
 
-	_, err = call(t, r, "search_semantic", map[string]any{"query": "hello"})
+	_, err = call(t, r, "search", map[string]any{"query": "hello", "semantic": true})
 	if err == nil {
 		t.Fatal("expected error when no embed client is configured")
 	}
@@ -371,7 +371,7 @@ func TestSearchSemanticRanksBySimilarity(t *testing.T) {
 	}}
 	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
 
-	out, err := call(t, r, "search_semantic", map[string]any{"query": "tell me about cats"})
+	out, err := call(t, r, "search", map[string]any{"query": "tell me about cats", "semantic": true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -399,11 +399,11 @@ func TestSearchSemanticCachesEmbeddingsAcrossCalls(t *testing.T) {
 	fake := &fakeEmbedder{}
 	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
 
-	_, err = call(t, r, "search_semantic", map[string]any{"query": "greeting"})
+	_, err = call(t, r, "search", map[string]any{"query": "greeting", "semantic": true})
 	must(t, err)
 	firstCalls := fake.calls
 
-	_, err = call(t, r, "search_semantic", map[string]any{"query": "greeting again"})
+	_, err = call(t, r, "search", map[string]any{"query": "greeting again", "semantic": true})
 	must(t, err)
 
 	// Second call should only re-embed the query, not re-embed a.txt (whose
@@ -422,7 +422,7 @@ func TestSearchSemanticSurfacesEmbedError(t *testing.T) {
 	fake := &fakeEmbedder{failWith: fmt.Errorf("ollama error: This server does not support embeddings")}
 	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
 
-	_, err = call(t, r, "search_semantic", map[string]any{"query": "hello"})
+	_, err = call(t, r, "search", map[string]any{"query": "hello", "semantic": true})
 	if err == nil || !strings.Contains(err.Error(), "does not support embeddings") {
 		t.Fatalf("expected embed error to be surfaced, got: %v", err)
 	}

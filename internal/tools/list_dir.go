@@ -55,7 +55,13 @@ type dirEntryInfo struct {
 	Size       int64  `json:"size,omitempty"`
 	Depth      int    `json:"depth"`
 	ModifiedAt string `json:"modified_at,omitempty"`
-	modTime    int64  // unexported: used for sorting only, not serialized
+}
+
+// dirEntryWithTime pairs a dirEntryInfo with its raw modification time for
+// sorting; the modTime field is never serialised.
+type dirEntryWithTime struct {
+	entry   dirEntryInfo
+	modTime int64
 }
 
 func (r *Registry) listDir(args map[string]any) (Result, error) {
@@ -84,7 +90,7 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 		return Result{}, fmt.Errorf("%q is not a directory", relPath)
 	}
 
-	var entries []dirEntryInfo
+	var withTimes []dirEntryWithTime
 	err = walkLimited(absPath, 1, depth, func(p string, d os.DirEntry, curDepth int) error {
 		if skipDirNames[d.Name()] {
 			if d.IsDir() {
@@ -113,16 +119,21 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 		if entryType != "dir" && !extensionMatches(d.Name(), extensions) {
 			return nil
 		}
-		if nameContains != "" && !strings.Contains(strings.ToLower(d.Name()), strings.ToLower(nameContains)) {
+		// Apply nameContains only to non-directory entries: directories are
+		// always emitted so that matching files under them have visible parent
+		// paths in the result (avoiding orphaned-looking entries).
+		if entryType != "dir" && nameContains != "" && !strings.Contains(strings.ToLower(d.Name()), strings.ToLower(nameContains)) {
 			return nil
 		}
-		entries = append(entries, dirEntryInfo{
-			Path:       r.root.RelPath(p),
-			Type:       entryType,
-			Size:       size,
-			Depth:      curDepth,
-			ModifiedAt: modifiedAt,
-			modTime:    modTime,
+		withTimes = append(withTimes, dirEntryWithTime{
+			entry: dirEntryInfo{
+				Path:       r.root.RelPath(p),
+				Type:       entryType,
+				Size:       size,
+				Depth:      curDepth,
+				ModifiedAt: modifiedAt,
+			},
+			modTime: modTime,
 		})
 		return nil
 	})
@@ -132,9 +143,14 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 
 	switch sortBy {
 	case "modified_time":
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].modTime > entries[j].modTime })
+		sort.SliceStable(withTimes, func(i, j int) bool { return withTimes[i].modTime > withTimes[j].modTime })
 	default:
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+		sort.SliceStable(withTimes, func(i, j int) bool { return withTimes[i].entry.Path < withTimes[j].entry.Path })
+	}
+
+	entries := make([]dirEntryInfo, len(withTimes))
+	for i, wt := range withTimes {
+		entries[i] = wt.entry
 	}
 
 	out, err := json.Marshal(entries)

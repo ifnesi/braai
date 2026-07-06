@@ -50,9 +50,12 @@ func Dir() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	// Ensure permissions are 0700 even if dir already existed with looser perms.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", err
+	// Tighten permissions if the directory existed with looser perms, but
+	// skip the syscall when already correct to avoid redundant work on every call.
+	if fi, err := os.Stat(dir); err == nil && fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", err
+		}
 	}
 	return dir, nil
 }
@@ -66,11 +69,6 @@ func ConfPath() (string, error) {
 	return filepath.Join(dir, "braai.conf"), nil
 }
 
-// Path is deprecated; use ConfPath instead. Kept for compatibility.
-func Path() (string, error) {
-	return ConfPath()
-}
-
 // CacheDir returns ~/.braai/cache, creating it with owner-only (0700) perms.
 func CacheDir() (string, error) {
 	dir, err := Dir()
@@ -81,8 +79,10 @@ func CacheDir() (string, error) {
 	if err := os.MkdirAll(cd, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(cd, 0o700); err != nil {
-		return "", err
+	if fi, err := os.Stat(cd); err == nil && fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(cd, 0o700); err != nil {
+			return "", err
+		}
 	}
 	return cd, nil
 }
@@ -107,8 +107,10 @@ func ModelsDir() (string, error) {
 	if err := os.MkdirAll(md, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(md, 0o700); err != nil {
-		return "", err
+	if fi, err := os.Stat(md); err == nil && fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(md, 0o700); err != nil {
+			return "", err
+		}
 	}
 	return md, nil
 }
@@ -422,7 +424,10 @@ func Save(s *Settings) error {
 		content += "\n"
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path) // atomic

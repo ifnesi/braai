@@ -10,45 +10,11 @@ import (
 	"sort"
 
 	"braai/internal/cache"
-	"braai/internal/ollama"
 )
 
 // maxTotalChunks bounds how many chunks (across all files) one search_semantic
 // call will score, to cap latency/memory on very large trees.
 const maxTotalChunks = 5000
-
-func searchSemanticDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name:        "search_semantic",
-			Description: "Search the entire working directory by meaning and return the most relevant passages (with file path and chunk_index), not just whole-file rankings. Embeddings are cached on disk (compressed + encrypted) so repeated searches are fast. After a match, call get_chunk(path, chunk_index) to read the full passage. Prefer search_content for exact substrings.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{
-						"type":        "string",
-						"description": "Natural-language description of what you're looking for.",
-					},
-					"top_k": map[string]any{
-						"type":        "integer",
-						"description": "Maximum number of ranked passages to return. Default 10.",
-					},
-					"threshold": map[string]any{
-						"type":        "number",
-						"description": "Minimum similarity score (0-1) to include a passage. Default 0 (return all, ranked).",
-					},
-					"extensions": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "Optional list of file extensions to restrict the search to, e.g. [\".md\", \".txt\"].",
-					},
-				},
-				"required": []string{"query"},
-			},
-		},
-	}
-}
 
 type semanticMatch struct {
 	Path       string  `json:"path"`

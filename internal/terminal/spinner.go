@@ -21,6 +21,7 @@ type Spinner struct {
 	lv Level
 
 	mu      sync.Mutex
+	label   string
 	running bool
 	stop    chan struct{}
 	done    chan struct{}
@@ -30,6 +31,14 @@ type Spinner struct {
 // If lv == None the spinner is a no-op (Start and Stop become no-ops).
 func NewSpinner(w io.Writer, lv Level) *Spinner {
 	return &Spinner{w: w, lv: lv}
+}
+
+// SetLabel updates the text shown alongside the spinner frame. Safe to call
+// while the spinner is running or stopped. An empty label shows just the frame.
+func (s *Spinner) SetLabel(label string) {
+	s.mu.Lock()
+	s.label = label
+	s.mu.Unlock()
 }
 
 // Start launches the spinner goroutine if it isn't already running. Safe to
@@ -61,13 +70,19 @@ func (s *Spinner) Stop() {
 		return
 	}
 	stopCh, doneCh := s.stop, s.done
+	label := s.label
 	s.running = false
 	s.mu.Unlock()
 
 	close(stopCh)
 	<-doneCh
-	// Erase the spinner line: carriage return + spaces + carriage return.
-	fmt.Fprint(s.w, "\r"+strings.Repeat(" ", 4)+"\r")
+	// Erase the spinner line: carriage return + enough spaces + carriage return.
+	// Account for frame (1 rune) + space + label.
+	eraseWidth := 2 + len([]rune(label))
+	if eraseWidth < 4 {
+		eraseWidth = 4
+	}
+	fmt.Fprint(s.w, "\r"+strings.Repeat(" ", eraseWidth)+"\r")
 }
 
 func (s *Spinner) run(stop, done chan struct{}) {
@@ -80,7 +95,14 @@ func (s *Spinner) run(stop, done chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			fmt.Fprintf(s.w, "\r%s ", spinnerFrames[i%len(spinnerFrames)])
+			s.mu.Lock()
+			label := s.label
+			s.mu.Unlock()
+			if label != "" {
+				fmt.Fprintf(s.w, "\r%s %s", spinnerFrames[i%len(spinnerFrames)], label)
+			} else {
+				fmt.Fprintf(s.w, "\r%s ", spinnerFrames[i%len(spinnerFrames)])
+			}
 			i++
 		}
 	}

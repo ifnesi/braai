@@ -168,8 +168,9 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 	for i := 0; i < a.opts.MaxToolCalls+1; i++ {
 		if a.opts.ContextLength > 0 && !warnedContext {
 			if ratio := float64(usedTokens) / float64(a.opts.ContextLength); ratio >= contextWarnThreshold {
-				fmt.Fprintf(a.opts.VerboseWriter, "warning: conversation is ~%d%% of %s's estimated %d-token context window (~%d tokens); it may start dropping earlier context or produce degraded answers. Consider a shorter prompt, fewer read_files at once, or (in chat mode) /clear.\n",
+				msg := fmt.Sprintf("warning: conversation is ~%d%% of %s's estimated %d-token context window (~%d tokens); it may start dropping earlier context or produce degraded answers. Consider a shorter prompt, fewer read_files at once, or (in chat mode) /clear.\n",
 					int(ratio*100), a.opts.Model, a.opts.ContextLength, usedTokens)
+				fmt.Fprint(a.opts.VerboseWriter, terminal.Yellow(a.opts.ColorLevel, msg))
 				warnedContext = true
 			}
 		}
@@ -180,6 +181,11 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		// calling Run). Spinner.Start is a no-op if already running, so this
 		// is safe even though the caller also starts it once up front.
 		if a.opts.Spinner != nil {
+			if i == 0 {
+				a.opts.Spinner.SetLabel("Thinking…")
+			} else {
+				a.opts.Spinner.SetLabel("Reasoning…")
+			}
 			a.opts.Spinner.Start()
 		}
 		streamer := newStreamPrinter(a.opts.Stdout, a.opts.ShowReasoning, a.opts.ColorLevel, a.opts.Spinner)
@@ -231,6 +237,15 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		}
 
 		for _, tc := range resp.Message.ToolCalls {
+			// Show a compact tool-call line on stdout (always, not just verbose),
+			// using the spinner line slot so it doesn't persist after the answer.
+			if a.opts.Spinner != nil {
+				a.opts.Spinner.Stop()
+			}
+			fmt.Fprintf(a.opts.Stdout, "  %s %s\n",
+				terminal.Dim(a.opts.ColorLevel, "⚙"),
+				terminal.Dim(a.opts.ColorLevel, tc.Function.Name))
+
 			key := toolCallKey(tc)
 			var result tools.Result
 			var callErr error

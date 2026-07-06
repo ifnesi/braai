@@ -5,37 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"braai/internal/ollama"
 )
-
-func readFileDefinition() ollama.Tool {
-	return ollama.Tool{
-		Type: "function",
-		Function: ollama.ToolFunction{
-			Name:        "read_file",
-			Description: "Read the contents of a text file within the working directory. Binary files are refused. Output may be truncated for very large files; an optional line range can be given to read a specific slice.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path": map[string]any{
-						"type":        "string",
-						"description": "Path relative to the working directory root.",
-					},
-					"start_line": map[string]any{
-						"type":        "integer",
-						"description": "1-based line number to start reading from (optional).",
-					},
-					"end_line": map[string]any{
-						"type":        "integer",
-						"description": "1-based inclusive line number to stop reading at (optional).",
-					},
-				},
-				"required": []string{"path"},
-			},
-		},
-	}
-}
 
 func (r *Registry) readFile(args map[string]any) (Result, error) {
 	relPath, err := stringArg(args, "path")

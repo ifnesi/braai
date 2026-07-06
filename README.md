@@ -189,7 +189,7 @@ for each attachment before the spinner starts.
 **Paths with spaces** use the standard shell backslash-escape convention:
 
 ```
->>> @FDSS\ -\ Follow-up\ call/notes/Meeting\ Summary.md what were the action items?
+>>> @Follow-up\ call/notes/Meeting\ Summary.md what were the action items?
 ```
 
 Press **Tab** after `@` (or after a partial path like `@notes/`) to complete

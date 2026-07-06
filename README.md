@@ -193,35 +193,82 @@ Example `~/.braai/braai.conf` (generated on first run with all defaults and help
 # key=value; lines starting with # are comments. Command-line flags override these.
 
 # ── Core ─────────────────────────────────────────────────────────────────────
+# URL of your local Ollama server (used for the chat model only).
 ollama_host=http://localhost:11434
-model=
+
+# Default chat model. Auto-detected from the first available model if blank.
+model=qwen3.6:35b-mlx
+
+# Hugging Face repo of the static embedding model braai downloads and runs
+# in-process for semantic search (NOT an Ollama model). No server needed.
 embed_model=minishlab/potion-retrieval-32M
+
+# Max tool calls the model may make per request before braai aborts the turn.
 max_tool_calls=100
+
+# How long braai waits for one Ollama request, in seconds. Covers a full
+# streamed turn (thinking + tokens). 0/blank = default 300 (5 minutes).
+# Raise this (e.g. 1200) for long-running summary commands.
 ollama_timeout=300
 
 # ── Ollama runtime (blank/0 = use server defaults) ───────────────────────────
+# Context window in tokens. Raise (e.g. 16384) if long tool results get
+# truncated and the model "forgets" and re-fetches. 0 = Ollama default.
 num_ctx=0
+
+# How long Ollama keeps the model loaded between calls, e.g. 30m or -1 (forever).
+# Blank = Ollama default. Keeping it resident avoids reload latency per call.
 keep_alive=
 
 # ── Chat recall history ──────────────────────────────────────────────────────
+# Number of past prompts kept for up/down-arrow recall (encrypted at rest).
 history_limit=100
 
-# ── Semantic-search cache ────────────────────────────────────────────────────
+# ── Semantic-search cache (encrypted at rest with ~/.braai/cache.key) ────────
+# Persist extracted document text to disk so get_chunk is instant. false = a
+# privacy-first mode: only embeddings/metadata cached, text re-extracted on demand.
 cache_extracted_text=true
+
+# Compression for cached text blobs: flate or none.
 cache_compression=flate
+
+# Encrypt cached text blobs at rest (AES-256-GCM). Strongly recommended.
 cache_encryption=true
+
+# Total on-disk budget for cache blobs before least-recently-used eviction.
+# 1073741824 = 1 GiB. Use -1 for unbounded.
 cache_max_bytes=1073741824
 
 # ── Tool limits (0 = use built-in default) ───────────────────────────────────
+# Max bytes read() returns for a single text file. -1 = unlimited.
 max_read_bytes=-1
+
+# Max size of a file that search/content will scan. 2097152 = 2 MiB.
 max_search_file_bytes=2097152
+
+# Max results returned by an exact (non-semantic) search.
 max_search_results=200
+
+# Max results returned when filtering entries by name (list_dir name_contains).
 max_name_results=500
+
+# Max number of files read() will accept in one batch (paths=[...]).
 max_batch_files=20
+
+# Max size of an image read_image will load. 10485760 = 10 MiB.
 max_image_bytes=10485760
+
+# Max number of files scanned in a whole-tree semantic search.
 max_semantic_files=200
+
+# Max passages returned by a semantic search.
 max_semantic_results=10
+
+# Max characters embedded per file/query for semantic search.
 max_embed_chars=8000
+
+# Max extracted text (bytes) per document when read() batches many docs, so a
+# multi-PDF read can't flood the model context. 131072 = 128 KiB.
 max_document_bytes=131072
 ```
 

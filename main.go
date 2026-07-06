@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.2.1"
+const version = "0.2.2"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -592,6 +592,8 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		fmt.Fprintf(rl.Stdout(), "%s%s  %s\n", m, pad, info[i])
 	}
 	fmt.Fprintln(rl.Stdout())
+	printHelp(rl.Stdout(), session.colorLevel)
+	fmt.Fprintln(rl.Stdout())
 
 	history := []ollama.Message{agent.SystemMessage()}
 	for {
@@ -712,6 +714,44 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	}
 }
 
+// printHelp writes the slash-command listing to out. Called both on startup
+// (as part of the banner) and when the user types /help.
+func printHelp(out io.Writer, colorLevel terminal.Level) {
+	type helpEntry struct{ cmd, desc string }
+	entries := []helpEntry{
+		{"/clear", "reset the conversation history"},
+		{"/forget-history", "erase ~/.braai/chat_history (the up/down recall history)"},
+		{"/tools [full]", "list tools available to the model (full: also show arguments)"},
+		{"/tree [<glob>]", "show working directory as an ASCII tree; optional glob filters root entries (e.g. /tree internal*)"},
+		{"/digest", "produce a structured project overview (walks tree, reads key files)"},
+		{"/model [<name>]", "show models or switch to <name> and save as default"},
+		{"/config [<key> [<value>]]", "list / show / change settings  (e.g. /config mode light)"},
+		{"/save <file>", "save the conversation transcript to a Markdown file"},
+		{"/export json <file>", "save conversation as a JSON array"},
+		{"/copy [last]", "copy full conversation (or last answer) to clipboard"},
+		{"/cache [clear]", "show semantic-search cache stats (clear: wipe it)"},
+		{"/cmd [<name> [args...]]", "run a custom prompt template (/cmd to list)"},
+		{"@<path>", "inline a file's content into the prompt sent to the model"},
+		{"", "  supported: text, PDF, Word, Excel, HTML, and more"},
+		{"", "  multiple @tokens allowed per message (e.g. @a.txt @b.pdf)"},
+		{"", "  escape spaces with \\ (e.g. @my\\ file.txt); Tab-completes paths"},
+		{"/help", "show this message"},
+		{"/bye, exit, quit", "leave the chat (Ctrl + d also works)"},
+	}
+	maxW := 0
+	for _, e := range entries {
+		if len(e.cmd) > maxW {
+			maxW = len(e.cmd)
+		}
+	}
+	fmt.Fprintln(out, "Commands:")
+	for _, e := range entries {
+		pad := strings.Repeat(" ", maxW-len(e.cmd)+2)
+		fmt.Fprintf(out, "  %s%s%s\n", terminal.Bold(colorLevel, e.cmd), pad, e.desc)
+	}
+}
+
+
 // handleSlashCommand processes a chat REPL command (a line starting with
 // "/") and returns the (possibly modified) history to continue the loop
 // with. Unknown commands are reported but otherwise harmless.
@@ -722,38 +762,7 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 
 	switch cmd {
 	case "/help":
-		type helpEntry struct{ cmd, desc string }
-		entries := []helpEntry{
-			{"/clear", "reset the conversation history"},
-			{"/forget-history", "erase ~/.braai/chat_history (the up/down recall history)"},
-			{"/tools [full]", "list tools available to the model (full: also show arguments)"},
-			{"/tree [<glob>]", "show working directory as an ASCII tree; optional glob filters root entries (e.g. /tree internal*)"},
-			{"/digest", "produce a structured project overview (walks tree, reads key files)"},
-			{"/model [<name>]", "show models or switch to <name> and save as default"},
-			{"/config [<key> [<value>]]", "list / show / change settings  (e.g. /config mode light)"},
-			{"/save <file>", "save the conversation transcript to a Markdown file"},
-			{"/export json <file>", "save conversation as a JSON array"},
-			{"/copy [last]", "copy full conversation (or last answer) to clipboard"},
-			{"/cache [clear]", "show semantic-search cache stats (clear: wipe it)"},
-			{"/cmd [<name> [args...]]", "run a custom prompt template (/cmd to list)"},
-			{"@<path>", "inline a file's content into the prompt sent to the model"},
-			{"", "  supported: text, PDF, Word, Excel, HTML, and more"},
-			{"", "  multiple @tokens allowed per message (e.g. @a.txt @b.pdf)"},
-			{"", "  escape spaces with \\ (e.g. @my\\ file.txt); Tab-completes paths"},
-			{"/help", "show this message"},
-			{"/bye, exit, quit", "leave the chat (Ctrl + d also works)"},
-		}
-		maxW := 0
-		for _, e := range entries {
-			if len(e.cmd) > maxW {
-				maxW = len(e.cmd)
-			}
-		}
-		fmt.Fprintln(out, "Commands:")
-		for _, e := range entries {
-			pad := strings.Repeat(" ", maxW-len(e.cmd)+2)
-			fmt.Fprintf(out, "  %s%s%s\n", terminal.Bold(session.colorLevel, e.cmd), pad, e.desc)
-		}
+		printHelp(out, session.colorLevel)
 		return history
 
 	case "/clear":

@@ -122,11 +122,31 @@ When braai starts an interactive session it prints a mascot alongside the
 session info:
 
 ```
- ╭◠◠◠◠◠╮   braai 0.2.1
+ ╭◠◠◠◠◠╮   braai 0.2.2
  |_____|   Working directory: /your/project
  [◕ ‿ ◕]   Model: qwen3:35b
 <╞═════╡>
  |_____|    Use Ctrl + d or /bye to exit, or /help for commands.
+
+Commands:
+  /clear                    reset the conversation history
+  /forget-history           erase ~/.braai/chat_history (the up/down recall history)
+  /tools [full]             list tools available to the model (full: also show arguments)
+  /tree [<glob>]            show working directory as an ASCII tree; optional glob filters root entries
+  /digest                   produce a structured project overview (walks tree, reads key files)
+  /model [<name>]           show models or switch to <name> and save as default
+  /config [<key> [<value>]] list / show / change settings  (e.g. /config mode light)
+  /save <file>              save the conversation transcript to a Markdown file
+  /export json <file>       save conversation as a JSON array
+  /copy [last]              copy full conversation (or last answer) to clipboard
+  /cache [clear]            show semantic-search cache stats (clear: wipe it)
+  /cmd [<name> [args...]]   run a custom prompt template (/cmd to list)
+  @<path>                   inline a file's content into the prompt sent to the model
+                              supported: text, PDF, Word, Excel, HTML, and more
+                              multiple @tokens allowed per message (e.g. @a.txt @b.pdf)
+                              escape spaces with \ (e.g. @my\ file.txt); Tab-completes paths
+  /help                     show this message
+  /bye, exit, quit          leave the chat (Ctrl + d also works)
 
 >>>
 ```

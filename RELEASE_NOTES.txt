@@ -12,6 +12,15 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.2.2] - 2026-07-06
+---------------------
+
+Changed
+  - Startup banner now prints the full /help command listing immediately after
+    the mascot, so available commands are visible without having to type /help.
+    The help output is rendered by a new printHelp() helper that is shared with
+    the /help slash-command, so the two are always in sync.
+
 [0.2.1] - 2026-07-06
 ---------------------
 

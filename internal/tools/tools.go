@@ -87,11 +87,26 @@ type Embedder interface {
 	Embed(ctx context.Context, model string, inputs []string) ([][]float32, error)
 }
 
+// FetchURLConfig groups the four fetch_url knobs so NewRegistry's signature
+// stays clean. Zero value disables the tool (Enabled: false).
+type FetchURLConfig struct {
+	Enabled        bool
+	HTTPSOnly      bool
+	MaxBytes       int
+	TimeoutSeconds int
+}
+
 // Registry executes tools against a confined root directory.
 type Registry struct {
 	root          *security.Root
 	limits        Limits
 	visionCapable bool
+
+	// fetch_url configuration (see FetchURLConfig).
+	fetchURLEnabled        bool
+	fetchURLHTTPSOnly      bool
+	fetchURLMaxBytes       int
+	fetchURLTimeoutSeconds int
 
 	embedClient Embedder
 	embedModel  string
@@ -128,15 +143,19 @@ type embedCacheEntry struct {
 // used by search_semantic; embedClient may be nil if the caller has no
 // embedding backend available, in which case search_semantic reports a clear
 // error instead of panicking.
-func NewRegistry(root *security.Root, limits Limits, visionCapable bool, embedClient Embedder, embedModel string) *Registry {
+func NewRegistry(root *security.Root, limits Limits, visionCapable bool, fetchCfg FetchURLConfig, embedClient Embedder, embedModel string) *Registry {
 	r := &Registry{
-		root:               root,
-		limits:             limits,
-		visionCapable:      visionCapable,
-		embedClient:        embedClient,
-		embedModel:         embedModel,
-		embedCache:         make(map[string]embedCacheEntry),
-		documentChunkCache: make(map[string][]textextract.Chunk),
+		root:                   root,
+		limits:                 limits,
+		visionCapable:          visionCapable,
+		fetchURLEnabled:        fetchCfg.Enabled,
+		fetchURLHTTPSOnly:      fetchCfg.HTTPSOnly,
+		fetchURLMaxBytes:       fetchCfg.MaxBytes,
+		fetchURLTimeoutSeconds: fetchCfg.TimeoutSeconds,
+		embedClient:            embedClient,
+		embedModel:             embedModel,
+		embedCache:             make(map[string]embedCacheEntry),
+		documentChunkCache:     make(map[string][]textextract.Chunk),
 	}
 	if embedClient != nil {
 		r.chunkEmbedder = textextract.NewChunkEmbedder(embedClient.Embed)
@@ -164,6 +183,9 @@ func (r *Registry) Definitions() []ollama.Tool {
 	if r.visionCapable {
 		defs = append(defs, readImageDefinition())
 	}
+	if r.fetchURLEnabled {
+		defs = append(defs, fetchURLDefinition())
+	}
 	return defs
 }
 
@@ -185,6 +207,8 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return r.statFile(args)
 	case "get_chunk":
 		return r.getChunk(args)
+	case "fetch_url":
+		return r.fetchURL(ctx, args)
 	default:
 		return Result{}, unknownToolError(name)
 	}

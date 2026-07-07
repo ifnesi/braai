@@ -12,6 +12,47 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.3.0] - 2026-07-07
+---------------------
+
+Added
+  - fetch_url tool: the model can now fetch a URL and receive its text content
+    alongside the HTTP status code. HTML pages are passed through a readability
+    filter (main article body extracted, navigation/sidebars/footers stripped)
+    and then converted to Markdown; other content types are returned as-is. The
+    tool surfaces all errors (network, TLS, 4xx/5xx) in the result text so the
+    LLM can decide how to respond — no retries are performed by the tool itself.
+  - Readability pre-filter for HTML pages (codeberg.org/readeck/go-readability/v2).
+    Strips navigation menus, sidebars, reference lists, footers, and other page
+    chrome before Markdown conversion, dramatically reducing the token count
+    returned to the model for content-heavy pages such as Wikipedia articles.
+  - Post-extraction text cap (32 KiB). Applied to the extracted text after
+    readability + Markdown conversion, independently of the raw body download
+    cap (fetch_url_max_bytes). When the cap is hit a "[content truncated]" note
+    is appended so the model knows the page continues beyond what was returned.
+  - fetch_url_enabled config key (default false). Privacy gate: when false the
+    tool definition is never sent to the model, so the model cannot make outbound
+    HTTP requests at all. Set to true in braai.conf or via /config to opt in.
+  - fetch_url_https_only config key (default true). Rejects plain http:// URLs
+    and blocks HTTPS-to-HTTP downgrade redirects at the tool level. Set to false
+    only for local or intranet HTTP targets.
+  - fetch_url_max_bytes config key (default 2097152 / 2 MiB). Caps the raw
+    response body size downloaded before text extraction.
+  - fetch_url_timeout_seconds config key (default 30). HTTP request timeout for
+    fetch_url calls. All four fetch_url_* keys are hot-applicable: /config
+    changes take effect immediately without restarting braai.
+  - Apache License 2.0. LICENSE file added; startup banner and --version output
+    now display "Licensed under the Apache License 2.0". Copyright held by
+    The braai Authors.
+
+Security
+  - fetch_url is disabled by default (fetch_url_enabled = false). Outbound HTTP
+    requests require explicit opt-in, keeping the default behaviour fully
+    offline and privacy-safe.
+  - When fetch_url_https_only = true (the default), plain http:// URLs are
+    rejected and any redirect that downgrades from HTTPS to HTTP is blocked at
+    the tool level, preventing silent bypass of the TLS requirement.
+
 [0.2.2] - 2026-07-06
 ---------------------
 

@@ -32,7 +32,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.2.2"
+const version = "0.3.0"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -99,7 +99,7 @@ Flags:
 	}
 
 	if *showVersion {
-		fmt.Fprintf(stdout, "braai %s\n", version)
+		fmt.Fprintf(stdout, "braai %s\nCopyright (c) The braai Authors\nLicensed under the Apache License, Version 2.0\n", version)
 		return nil
 	}
 
@@ -384,7 +384,13 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 	if s.embedder != nil {
 		embedClient = s.embedder
 	}
-	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), embedClient, s.embedModel)
+	fetchCfg := tools.FetchURLConfig{
+		Enabled:        s.settings.FetchURLEnabled != nil && *s.settings.FetchURLEnabled,
+		HTTPSOnly:      s.settings.FetchURLHTTPSOnly == nil || *s.settings.FetchURLHTTPSOnly,
+		MaxBytes:       s.settings.FetchURLMaxBytes,
+		TimeoutSeconds: s.settings.FetchURLTimeoutSeconds,
+	}
+	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), fetchCfg, embedClient, s.embedModel)
 	registry.SetCache(s.cache)
 	ag := agent.New(s.client, registry, agent.Options{
 		Model:         model,
@@ -448,6 +454,12 @@ func (s *chatSession) applyConfigField(ctx context.Context, key string) error {
 			MaxEmbedChars:      s.settings.MaxEmbedChars,
 			MaxDocumentBytes:   s.settings.MaxDocumentBytes,
 		}
+	case "fetch_url_enabled",
+		"fetch_url_https_only",
+		"fetch_url_max_bytes",
+		"fetch_url_timeout_seconds":
+		// fetch_url config is read directly from s.settings in switchModel;
+		// no local field update needed — just fall through to the rebuild below.
 	}
 	return s.switchModel(ctx, s.model)
 }
@@ -582,7 +594,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		terminal.Bold(session.colorLevel, "braai") + " " + terminal.Bold(session.colorLevel, version),
 		"Working directory: " + terminal.Cyan(session.colorLevel, session.workingDir),
 		"Model: " + terminal.Green(session.colorLevel, session.model),
-		"",
+		terminal.Dim(session.colorLevel, "Licensed under the Apache License 2.0"),
 		terminal.Dim(session.colorLevel, "Use Ctrl + d or /bye to exit, or /help for commands."),
 	}
 	// Pad each mascot line to a fixed visual width so the info column aligns cleanly.

@@ -74,7 +74,7 @@ func setupRegistry(t *testing.T, visionCapable bool) *Registry {
 	if err != nil {
 		t.Fatalf("NewRoot: %v", err)
 	}
-	return NewRegistry(root, DefaultLimits(), visionCapable, &fakeEmbedder{}, "fake-embed-model")
+	return NewRegistry(root, DefaultLimits(), visionCapable, FetchURLConfig{}, &fakeEmbedder{}, "fake-embed-model")
 }
 
 func must(t *testing.T, err error) {
@@ -134,7 +134,7 @@ func TestListDirSortByModifiedTime(t *testing.T) {
 
 	root, err := security.NewRoot(dir)
 	must(t, err)
-	r := NewRegistry(root, DefaultLimits(), false, &fakeEmbedder{}, "fake-embed-model")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, &fakeEmbedder{}, "fake-embed-model")
 
 	out, err := call(t, r, "list_dir", map[string]any{"path": ".", "sort_by": "modified_time"})
 	if err != nil {
@@ -280,7 +280,7 @@ func TestSearchContentExcerptDoesNotSplitMultiByteRune(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(dir, "unicode.txt"), []byte(line), 0o644))
 	root, err := security.NewRoot(dir)
 	must(t, err)
-	r := NewRegistry(root, DefaultLimits(), false, &fakeEmbedder{}, "fake-embed-model")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, &fakeEmbedder{}, "fake-embed-model")
 
 	out, err := call(t, r, "search", map[string]any{"query": "target"})
 	if err != nil {
@@ -346,7 +346,7 @@ func TestSearchSemanticRequiresEmbedClient(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644))
 	root, err := security.NewRoot(dir)
 	must(t, err)
-	r := NewRegistry(root, DefaultLimits(), false, nil, "")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, nil, "")
 
 	_, err = call(t, r, "search", map[string]any{"query": "hello", "semantic": true})
 	if err == nil {
@@ -369,7 +369,7 @@ func TestSearchSemanticRanksBySimilarity(t *testing.T) {
 		}
 		return []float32{0, 1}
 	}}
-	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, fake, "fake-embed-model")
 
 	out, err := call(t, r, "search", map[string]any{"query": "tell me about cats", "semantic": true})
 	if err != nil {
@@ -397,7 +397,7 @@ func TestSearchSemanticCachesEmbeddingsAcrossCalls(t *testing.T) {
 	must(t, err)
 
 	fake := &fakeEmbedder{}
-	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, fake, "fake-embed-model")
 
 	_, err = call(t, r, "search", map[string]any{"query": "greeting", "semantic": true})
 	must(t, err)
@@ -420,7 +420,7 @@ func TestSearchSemanticSurfacesEmbedError(t *testing.T) {
 	must(t, err)
 
 	fake := &fakeEmbedder{failWith: fmt.Errorf("ollama error: This server does not support embeddings")}
-	r := NewRegistry(root, DefaultLimits(), false, fake, "fake-embed-model")
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, fake, "fake-embed-model")
 
 	_, err = call(t, r, "search", map[string]any{"query": "hello", "semantic": true})
 	if err == nil || !strings.Contains(err.Error(), "does not support embeddings") {

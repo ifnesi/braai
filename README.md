@@ -1,5 +1,7 @@
 # braai
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 <table border="0" cellpadding="0" cellspacing="0"><tr>
 <td valign="top"><pre>
  ╭◠◠◠◠◠╮
@@ -122,10 +124,10 @@ When braai starts an interactive session it prints a mascot alongside the
 session info:
 
 ```
- ╭◠◠◠◠◠╮   braai 0.2.2
- |_____|   Working directory: /your/project
- [◕ ‿ ◕]   Model: qwen3:35b
-<╞═════╡>
+ ╭◠◠◠◠◠╮    braai 0.3.0       
+ |_____|    Working directory: .
+ [◕ ‿ ◕]    Model: qwen3.6:35b-mlx
+<╞═════╡>   Licensed under the Apache License 2.0
  |_____|    Use Ctrl + d or /bye to exit, or /help for commands.
 
 Commands:
@@ -360,6 +362,22 @@ max_embed_chars=8000
 # Max extracted text (bytes) per document when read() batches many docs, so a
 # multi-PDF read can't flood the model context. 131072 = 128 KiB.
 max_document_bytes=131072
+
+# ── Network tools ───────────────────────────────────────────────────────────
+# Allow the model to fetch URLs and return their extracted text content.
+# DISABLED BY DEFAULT: enabling this lets the model make outbound HTTP
+# requests. Only enable if you trust the model to fetch URLs appropriately.
+fetch_url_enabled=false
+
+# Enforce HTTPS-only fetching. When true (strongly recommended), plain http://
+# URLs and HTTPS-to-HTTP downgrade redirects are rejected at the tool level.
+fetch_url_https_only=true
+
+# Max response body size (bytes) read before text extraction. 2097152 = 2 MiB.
+fetch_url_max_bytes=2097152
+
+# HTTP request timeout in seconds for fetch_url calls.
+fetch_url_timeout_seconds=30
 ```
 
 **Core settings:**
@@ -399,6 +417,13 @@ max_document_bytes=131072
 - `max_semantic_results` — Results from semantic search (default: `10`)
 - `max_embed_chars` — Characters embedded per file (default: `8000`)
 - `max_document_bytes` — Extracted text per document in batch read (default: `131072` / 128 KiB)
+
+**Network tools:**
+
+- `fetch_url_enabled` — Expose the `fetch_url` tool to the model (default: `false`). **Disabled by default** — set to `true` to opt in. See [Network tools](#network-tools) below.
+- `fetch_url_https_only` — Reject plain `http://` URLs and block HTTPS→HTTP downgrade redirects (default: `true`). Set to `false` for local/intranet HTTP targets.
+- `fetch_url_max_bytes` — Max response body size before text extraction (default: `2097152` / 2 MiB)
+- `fetch_url_timeout_seconds` — HTTP request timeout in seconds (default: `30`)
 
 ### Custom prompt-template commands
 
@@ -514,11 +539,47 @@ The agent can only call the tools below, all confined to `--working-dir`. Use
 
 There are no write, delete, rename, mkdir, chmod, or shell-execution tools
 exposed to the model — this is intentional and hardcoded, not something that
-can be enabled.
+can be enabled. The `fetch_url` tool (see [Network tools](#network-tools) below)
+is the sole outbound-network tool and is **opt-in only** (disabled by default).
 
 `.git`, `node_modules`, `vendor`, `.idea`, and `.DS_Store` are skipped by
 directory listing, name search, content search, and semantic search for
 usability (see `internal/tools/tools.go`).
+
+## Network tools
+
+The `fetch_url` tool allows the model to fetch a URL and receive its main text
+content alongside the HTTP status code. HTML pages are first passed through a
+**readability filter** that extracts the main article body — stripping navigation
+menus, sidebars, ads, reference lists, and footers — then converted to Markdown.
+Other content types (JSON, plain text, etc.) are returned as-is. The tool
+surfaces all errors in the result — network failures, TLS errors, and 4xx/5xx
+responses — so the LLM can decide whether to retry, escalate, or continue. No
+retries are performed by the tool itself.
+
+**Token efficiency.** Two caps are applied to keep the result within a
+manageable size for the model context window:
+- `fetch_url_max_bytes` (default 2 MiB) — limits the raw HTTP response body
+  downloaded from the server.
+- A hard 32 KiB cap applied to the *extracted text* after readability + Markdown
+  conversion. When hit, `[content truncated]` is appended so the model knows
+  the page continues.
+
+**Disabled by default.** `fetch_url` is never offered to the model unless you
+explicitly set `fetch_url_enabled = true` in `~/.braai/braai.conf` (or via
+`/config fetch_url_enabled true`). This means that in the default configuration
+braai makes **no outbound HTTP requests** on behalf of the model whatsoever.
+
+**HTTPS-only by default.** With `fetch_url_https_only = true` (the default):
+- Plain `http://` URLs are rejected at the tool level.
+- Any redirect that downgrades from HTTPS to HTTP is blocked, preventing
+  silent bypass of the TLS requirement.
+
+Set `fetch_url_https_only = false` only when you need to reach local
+development servers or intranet URLs that do not support HTTPS.
+
+All four `fetch_url_*` config keys are hot-applicable: `/config fetch_url_enabled true`
+takes effect immediately without restarting braai.
 
 ## Semantic search & caching
 
@@ -559,7 +620,9 @@ current directory's cache.
 **Privacy switches.** Set `cache_extracted_text: false` to keep document text
 off disk entirely (embeddings still persist, but they can't be reversed into
 text). Encryption is on by default; see the security notes below for the key's
-threat model.
+threat model. Set `fetch_url_enabled = false` (the default) to prevent the
+model from making any outbound HTTP requests — when disabled, `fetch_url` is
+never advertised to the model and no network calls are made on its behalf.
 
 ## Security model
 
@@ -680,3 +743,8 @@ embedding cache, and error surfacing) in `internal/tools`. The
 `search_semantic` tests use a small in-memory fake embedder (an `Embedder`
 interface also satisfied by `*staticembed.Model`) so they don't need a real
 embedding model or Ollama server.
+
+## License
+
+Copyright (c) The braai Authors.
+Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -38,6 +38,12 @@ type Settings struct {
 	MaxSemanticResults int
 	MaxEmbedChars      int
 	MaxDocumentBytes   int
+
+	// Network tools (fetch_url). All default to disabled/conservative.
+	FetchURLEnabled        *bool
+	FetchURLHTTPSOnly      *bool
+	FetchURLMaxBytes       int
+	FetchURLTimeoutSeconds int
 }
 
 // Dir returns the ~/.braai directory, creating it if necessary with owner-only (0700)
@@ -238,6 +244,20 @@ func Load() (*Settings, error) {
 			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
 				s.CacheMaxBytes = n
 			}
+		case "fetch_url_enabled":
+			b := parseBool(val)
+			s.FetchURLEnabled = &b
+		case "fetch_url_https_only":
+			b := parseBool(val)
+			s.FetchURLHTTPSOnly = &b
+		case "fetch_url_max_bytes":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.FetchURLMaxBytes = n
+			}
+		case "fetch_url_timeout_seconds":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.FetchURLTimeoutSeconds = n
+			}
 		}
 	}
 
@@ -302,6 +322,18 @@ func Save(s *Settings) error {
 	add("max_semantic_results", strconv.Itoa(s.MaxSemanticResults))
 	add("max_embed_chars", strconv.Itoa(s.MaxEmbedChars))
 	add("max_document_bytes", strconv.Itoa(s.MaxDocumentBytes))
+	if s.FetchURLEnabled != nil {
+		add("fetch_url_enabled", fmt.Sprintf("%v", *s.FetchURLEnabled))
+	}
+	if s.FetchURLHTTPSOnly != nil {
+		add("fetch_url_https_only", fmt.Sprintf("%v", *s.FetchURLHTTPSOnly))
+	}
+	if s.FetchURLMaxBytes > 0 {
+		add("fetch_url_max_bytes", strconv.Itoa(s.FetchURLMaxBytes))
+	}
+	if s.FetchURLTimeoutSeconds > 0 {
+		add("fetch_url_timeout_seconds", strconv.Itoa(s.FetchURLTimeoutSeconds))
+	}
 
 	want := make(map[string]string, len(desired))
 	for _, d := range desired {
@@ -411,6 +443,22 @@ func Save(s *Settings) error {
 			"# Max extracted text (bytes) per document when read() batches many docs, so a",
 			"# multi-PDF read can't flood the model context. 131072 = 128 KiB.",
 			"max_document_bytes=131072",
+			"",
+			"# ── Network tools ───────────────────────────────────────────────────────────",
+			"# Allow the model to fetch URLs and return their extracted text content.",
+			"# DISABLED BY DEFAULT: enabling this lets the model make outbound HTTP",
+			"# requests. Only enable if you trust the model to fetch URLs appropriately.",
+			"fetch_url_enabled=false",
+			"",
+			"# Enforce HTTPS-only fetching. When true (strongly recommended), plain http://",
+			"# URLs and HTTPS-to-HTTP downgrade redirects are rejected at the tool level.",
+			"fetch_url_https_only=true",
+			"",
+			"# Max response body size (bytes) read before text extraction. 2097152 = 2 MiB.",
+			"fetch_url_max_bytes=2097152",
+			"",
+			"# HTTP request timeout in seconds for fetch_url calls.",
+			"fetch_url_timeout_seconds=30",
 			"",
 		}
 		out = append(out, template...)
@@ -525,6 +573,30 @@ func ApplyDefaults(s *Settings) bool {
 		s.MaxDocumentBytes = 131072
 		modified = true
 	}
+
+	// FetchURLEnabled: default false (privacy-first, must opt in)
+	if s.FetchURLEnabled == nil {
+		f := false
+		s.FetchURLEnabled = &f
+		modified = true
+	}
+	// FetchURLHTTPSOnly: default true (security-first)
+	if s.FetchURLHTTPSOnly == nil {
+		t := true
+		s.FetchURLHTTPSOnly = &t
+		modified = true
+	}
+	// FetchURLMaxBytes: default 2 MiB
+	if s.FetchURLMaxBytes == 0 {
+		s.FetchURLMaxBytes = 2 * 1024 * 1024
+		modified = true
+	}
+	// FetchURLTimeoutSeconds: default 30 seconds
+	if s.FetchURLTimeoutSeconds == 0 {
+		s.FetchURLTimeoutSeconds = 30
+		modified = true
+	}
+
 	// NumCtx (0) and KeepAlive ("") intentionally left as "server default".
 
 	return modified
@@ -611,6 +683,16 @@ var ConfigDefs = []ConfigDef{
 		Description: "Max characters embedded per file/query for semantic search."},
 	{Key: "max_document_bytes", Type: "int", Section: "Tool limits", Hot: true,
 		Description: "Max extracted text (bytes) per document in a batch read. 131072 = 128 KiB."},
+
+	// ── Network tools ─────────────────────────────────────────────────────────
+	{Key: "fetch_url_enabled", Type: "bool", Section: "Network tools", Hot: true,
+		Description: "Expose the fetch_url tool to the model. DISABLED BY DEFAULT — enabling allows the model to make outbound HTTP requests. Set to true to opt in."},
+	{Key: "fetch_url_https_only", Type: "bool", Section: "Network tools", Hot: true,
+		Description: "Reject plain http:// URLs and block HTTPS-to-HTTP downgrade redirects. Strongly recommended; set to false only for local/intranet HTTP targets."},
+	{Key: "fetch_url_max_bytes", Type: "int", Section: "Network tools", Hot: true,
+		Description: "Max response body size (bytes) read before text extraction. 2097152 = 2 MiB."},
+	{Key: "fetch_url_timeout_seconds", Type: "int", Section: "Network tools", Hot: true,
+		Description: "HTTP request timeout in seconds for fetch_url calls."},
 }
 
 // GetCurrentValue returns the current value of key from s as a printable
@@ -672,6 +754,20 @@ func GetCurrentValue(s *Settings, key string) string {
 		return strconv.Itoa(s.MaxEmbedChars)
 	case "max_document_bytes":
 		return strconv.Itoa(s.MaxDocumentBytes)
+	case "fetch_url_enabled":
+		if s.FetchURLEnabled == nil {
+			return ""
+		}
+		return strconv.FormatBool(*s.FetchURLEnabled)
+	case "fetch_url_https_only":
+		if s.FetchURLHTTPSOnly == nil {
+			return ""
+		}
+		return strconv.FormatBool(*s.FetchURLHTTPSOnly)
+	case "fetch_url_max_bytes":
+		return strconv.Itoa(s.FetchURLMaxBytes)
+	case "fetch_url_timeout_seconds":
+		return strconv.Itoa(s.FetchURLTimeoutSeconds)
 	}
 	return ""
 }
@@ -801,6 +897,30 @@ func SetField(s *Settings, key, value string) error {
 			return fmt.Errorf("max_document_bytes: must be a positive integer, got %q", value)
 		}
 		s.MaxDocumentBytes = n
+	case "fetch_url_enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("fetch_url_enabled: must be true or false, got %q", value)
+		}
+		s.FetchURLEnabled = &b
+	case "fetch_url_https_only":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("fetch_url_https_only: must be true or false, got %q", value)
+		}
+		s.FetchURLHTTPSOnly = &b
+	case "fetch_url_max_bytes":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("fetch_url_max_bytes: must be a positive integer, got %q", value)
+		}
+		s.FetchURLMaxBytes = n
+	case "fetch_url_timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("fetch_url_timeout_seconds: must be a positive integer, got %q", value)
+		}
+		s.FetchURLTimeoutSeconds = n
 	default:
 		return fmt.Errorf("unknown config key %q; run /config to list all valid keys", key)
 	}

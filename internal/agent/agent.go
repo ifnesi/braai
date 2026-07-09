@@ -203,8 +203,19 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (RunResult, e
 		}
 		streamer.finish()
 
-		history = append(history, resp.Message)
-		usedTokens += messageTokenCost(resp.Message)
+		// Strip the reasoning trace before carrying this turn forward in
+		// history, regardless of ShowReasoning: Thinking only ever reflects
+		// what the model produced for its OWN current turn, so a later turn
+		// gains nothing from re-reading it — but re-sending it on every
+		// subsequent request means Ollama has to reprocess the model's
+		// entire past chain-of-thought (often far larger than its final
+		// answers) before it can even start on a follow-up. resp.Message
+		// itself is left untouched so result.Reasoning below still reports
+		// this turn's own reasoning.
+		historical := resp.Message
+		historical.Thinking = ""
+		history = append(history, historical)
+		usedTokens += messageTokenCost(historical)
 
 		if len(resp.Message.ToolCalls) == 0 {
 			result := RunResult{

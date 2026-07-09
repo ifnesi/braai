@@ -135,7 +135,7 @@ When braai starts an interactive session it prints a mascot alongside the
 session info:
 
 ```
- ╭◠◠◠◠◠╮    braai 0.4.0       
+ ╭◠◠◠◠◠╮    braai 0.4.1       
  |_____|    Working directory: .
  [◕ ‿ ◕]    Model: qwen3.6:35b-mlx
 <╞═════╡>   Licensed under the Apache License 2.0

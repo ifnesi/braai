@@ -33,7 +33,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.4.0"
+const version = "0.4.1"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -803,7 +803,18 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		}
 
 		history = append(history, ollama.Message{Role: "user", Content: expanded})
+		// preAutoContextLen marks the position right after the user's own
+		// message, before any auto-context injection. Captured so the
+		// injected pair (if any) can be stripped back out below once this
+		// turn is done with it — auto-context re-retrieves fresh every turn
+		// anyway, so there's nothing to gain from resending an old turn's
+		// retrieved passages in every future request. injected (the dedup
+		// set) is intentionally left alone: it tracks "already shown once,
+		// don't repeat" independent of whether that content still physically
+		// sits in history.
+		preAutoContextLen := len(history)
 		history = maybeInjectAutoContext(ctx, session.registry, session.settings, history, expanded, injected)
+		injectedCount := len(history) - preAutoContextLen
 		// In text mode the answer streams straight to stdout as it arrives;
 		// in JSON mode it was buffered (Stdout was io.Discard) and is
 		// printed here instead. session.ag is re-read fresh each turn since
@@ -835,6 +846,15 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 
 		if err != nil {
 			sp.Stop() // erase spinner before printing error
+			// The request that would have used this turn's auto-context
+			// injection failed, so there's nothing to keep it for — roll
+			// history back to before the injection rather than leaving it
+			// stuck there permanently (history isn't reassigned from
+			// result.History below on this path, so without this it would
+			// otherwise persist into every future turn for no benefit).
+			if injectedCount > 0 {
+				history = history[:preAutoContextLen:preAutoContextLen]
+			}
 			if errors.Is(err, context.Canceled) {
 				// Context cancelled by Ctrl-C: reset terminal styling that was open
 				// during agent execution (e.g. dim codes from thinking output).
@@ -861,6 +881,15 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 			fmt.Fprintf(rl.Stdout(), "  %s\n", terminal.Cyan(session.colorLevel, formatElapsed(elapsed)))
 		}
 		history = result.History
+		if injectedCount > 0 {
+			// Drop this turn's auto-context injection from what's carried
+			// into the next turn's request: keep everything up to and
+			// including the user's message, skip the injected pair, then
+			// keep everything the model itself added afterward (its own
+			// tool calls and final answer). The dedup set above already
+			// recorded these chunks were shown, independent of this.
+			history = append(history[:preAutoContextLen:preAutoContextLen], result.History[preAutoContextLen+injectedCount:]...)
+		}
 	}
 }
 

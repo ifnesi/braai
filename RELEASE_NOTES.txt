@@ -12,6 +12,59 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.4.1] - 2026-07-09
+---------------------
+
+Fixed
+  - Follow-up turns no longer resend every prior turn's full reasoning/
+    thinking trace to Ollama. Agent.Run previously appended the model's
+    complete resp.Message (including Thinking) to history verbatim, so every
+    subsequent request had to reprocess the model's entire past chain-of-
+    thought — often far larger than its visible final answers — on top of
+    the conversation's actual content. This is very likely the dominant
+    cause of follow-up questions getting progressively slower after a large
+    (reasoning-heavy) response. Thinking is now cleared from the message
+    before it's appended to history, regardless of --hide-reasoning; the
+    current turn's own reasoning is unaffected (still streamed live and
+    still reported in RunResult.Reasoning). Verified with new tests
+    (internal/agent/agent_run_test.go), including an end-to-end check that a
+    second request's raw HTTP body genuinely no longer contains the first
+    turn's thinking text.
+  - The verbose tool-call "result: ..." preview line (and "attached N
+    image(s)") had no color applied at all, so on most dark-background
+    terminals it rendered in the same default bright color as the model's
+    actual answer text, despite being grouped with the yellow tool-trace
+    lines around it. Now dimmed, consistent with the rest of that group.
+
+Changed
+  - Auto-context injections are now dropped from history once their turn
+    completes (interactive chat), instead of persisting in every future
+    request for the rest of the conversation. Auto-context re-retrieves
+    fresh every turn anyway, so an old turn's injected passages add nothing
+    once that turn's own answer already reflects them — same rationale as
+    the Thinking fix above, applied to a different message pair. The dedup
+    set that prevents re-injecting the same chunk twice in a session is
+    unaffected by this and still applies. Handled on both the normal and
+    the error/interrupted turn path, so a failed request doesn't leave an
+    injection stuck in history permanently.
+  - Every streamed block of model-generated text is now preceded by a bold
+    cyan "── Response ──" divider as it starts. Fixes interim commentary the
+    model prints right before calling a tool being visually indistinguishable
+    from the actual final answer (both previously rendered in the terminal's
+    default color). Printed unconditionally at the start of every segment
+    rather than only before the one that turns out final: which segment is
+    "the answer" is only knowable once the full response is parsed (after it
+    has already streamed), so predicting it live would require either
+    buffering (sacrificing live streaming) or erasing/reprinting already-
+    drawn terminal output (fragile cursor math, breaks on resize) — marking
+    every segment's start is simple, always correct, and gives an
+    unambiguous boundary either way, even when a turn produces two dividers.
+  - Elapsed turn time is now printed after the Sources footer (or on its own
+    line if there were no citations), in cyan, in both one-shot and
+    interactive chat mode, e.g. "9.4s". Sub-10-second durations show one
+    decimal place; longer ones round to whole seconds.
+
+
 [0.4.0] - 2026-07-09
 ---------------------
 

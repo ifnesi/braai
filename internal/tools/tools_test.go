@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -17,15 +19,17 @@ import (
 // fakeEmbedder is a minimal in-memory stand-in for *ollama.Client's Embed
 // method, so search_semantic tests don't need a real Ollama server. It
 // returns a deterministic vector per distinct input string and counts calls
-// so tests can verify the embedding cache is actually being used.
+// so tests can verify the embedding cache is actually being used. Embed is
+// called concurrently now that search_semantic embeds files with a worker
+// pool, so calls is an atomic counter rather than a plain int.
 type fakeEmbedder struct {
-	calls     int
+	calls     atomic.Int64
 	failWith  error
 	vectorFor func(input string) []float32
 }
 
 func (f *fakeEmbedder) Embed(_ context.Context, _ string, inputs []string) ([][]float32, error) {
-	f.calls++
+	f.calls.Add(1)
 	if f.failWith != nil {
 		return nil, f.failWith
 	}
@@ -401,15 +405,115 @@ func TestSearchSemanticCachesEmbeddingsAcrossCalls(t *testing.T) {
 
 	_, err = call(t, r, "search", map[string]any{"query": "greeting", "semantic": true})
 	must(t, err)
-	firstCalls := fake.calls
+	firstCalls := fake.calls.Load()
 
 	_, err = call(t, r, "search", map[string]any{"query": "greeting again", "semantic": true})
 	must(t, err)
 
 	// Second call should only re-embed the query, not re-embed a.txt (whose
 	// mtime hasn't changed), so total calls should grow by exactly 1.
-	if fake.calls != firstCalls+1 {
-		t.Fatalf("expected file embedding to be cached: first=%d second=%d", firstCalls, fake.calls)
+	if got := fake.calls.Load(); got != firstCalls+1 {
+		t.Fatalf("expected file embedding to be cached: first=%d second=%d", firstCalls, got)
+	}
+}
+
+// TestSearchSemanticEmbedsFilesConcurrently confirms the worker pool actually
+// overlaps work across files (not effectively serialized), by having each
+// file-chunk embed call block until every file has started at least one
+// call. If embedAndScoreFiles regressed to one-file-at-a-time, this deadlocks
+// and the test times out instead of silently passing. The query itself is
+// embedded synchronously before file-parallel work begins (by design — it's
+// a single call, not worth parallelizing), so it's excluded from the wait
+// group rather than expected to overlap with file embedding.
+//
+// Errors from the background goroutine are only ever sent over a channel,
+// never passed to t.Fatal/must there: calling those from a goroutine that
+// might still be running after this test function returns (e.g. the timeout
+// path) panics with "Fail in goroutine after Test has completed".
+func TestSearchSemanticEmbedsFilesConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	const numFiles = 4
+	for i := 0; i < numFiles; i++ {
+		must(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.txt", i)), []byte(fmt.Sprintf("filecontent%d", i)), 0o644))
+	}
+	root, err := security.NewRoot(dir)
+	must(t, err)
+
+	var wg sync.WaitGroup
+	wg.Add(numFiles)
+	released := make(chan struct{})
+	var once sync.Once
+
+	fake := &fakeEmbedder{vectorFor: func(input string) []float32 {
+		if !strings.HasPrefix(input, "filecontent") {
+			return hashVector(input) // the query embed; runs before file work starts
+		}
+		wg.Done()
+		<-released // block until every file has started embedding concurrently
+		return hashVector(input)
+	}}
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, fake, "fake-embed-model")
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, callErr := call(t, r, "search", map[string]any{"query": "unrelated query text", "semantic": true})
+		errCh <- callErr
+	}()
+
+	go func() {
+		wg.Wait() // every file has started embedding concurrently
+		once.Do(func() { close(released) })
+	}()
+
+	select {
+	case callErr := <-errCh:
+		if callErr != nil {
+			t.Fatalf("unexpected error: %v", callErr)
+		}
+	case <-time.After(5 * time.Second):
+		once.Do(func() { close(released) }) // let the blocked goroutines finish, avoiding a leak
+		t.Fatal("timed out waiting for concurrent embedding; worker pool may be serialized")
+	}
+}
+
+// TestSearchSemanticReportsIndexProgress checks that SetIndexProgress
+// receives a final call equal to (total, total), and that done never exceeds
+// total, despite being invoked concurrently by the worker pool.
+func TestSearchSemanticReportsIndexProgress(t *testing.T) {
+	dir := t.TempDir()
+	const numFiles = 5
+	for i := 0; i < numFiles; i++ {
+		must(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.txt", i)), []byte(fmt.Sprintf("content %d", i)), 0o644))
+	}
+	root, err := security.NewRoot(dir)
+	must(t, err)
+
+	r := NewRegistry(root, DefaultLimits(), false, FetchURLConfig{}, &fakeEmbedder{}, "fake-embed-model")
+
+	var mu sync.Mutex
+	var calls [][2]int
+	r.SetIndexProgress(func(done, total int) {
+		mu.Lock()
+		calls = append(calls, [2]int{done, total})
+		mu.Unlock()
+	})
+
+	_, err = call(t, r, "search", map[string]any{"query": "content", "semantic": true})
+	must(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("expected at least one progress callback")
+	}
+	last := calls[len(calls)-1]
+	if last[0] != numFiles || last[1] != numFiles {
+		t.Fatalf("expected final progress (%d, %d), got (%d, %d)", numFiles, numFiles, last[0], last[1])
+	}
+	for _, c := range calls {
+		if c[0] > c[1] {
+			t.Fatalf("done (%d) exceeded total (%d)", c[0], c[1])
+		}
 	}
 }
 

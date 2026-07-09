@@ -44,6 +44,16 @@ type Settings struct {
 	FetchURLHTTPSOnly      *bool
 	FetchURLMaxBytes       int
 	FetchURLTimeoutSeconds int
+
+	// Auto-context (RAG-before-answering): automatically embed each user
+	// turn and inject the most relevant passages into the conversation
+	// before the model responds, instead of relying on the model to call
+	// search itself. Uses the same parallel indexing pipeline and progress
+	// bar as an explicit semantic search.
+	AutoContextEnabled  *bool
+	AutoContextTopK     int
+	AutoContextMinScore float64
+	AutoContextMaxChars int
 }
 
 // Dir returns the ~/.braai directory, creating it if necessary with owner-only (0700)
@@ -258,6 +268,21 @@ func Load() (*Settings, error) {
 			if n, err := strconv.Atoi(val); err == nil {
 				s.FetchURLTimeoutSeconds = n
 			}
+		case "auto_context_enabled":
+			b := parseBool(val)
+			s.AutoContextEnabled = &b
+		case "auto_context_top_k":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.AutoContextTopK = n
+			}
+		case "auto_context_min_score":
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				s.AutoContextMinScore = f
+			}
+		case "auto_context_max_chars":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.AutoContextMaxChars = n
+			}
 		}
 	}
 
@@ -333,6 +358,18 @@ func Save(s *Settings) error {
 	}
 	if s.FetchURLTimeoutSeconds > 0 {
 		add("fetch_url_timeout_seconds", strconv.Itoa(s.FetchURLTimeoutSeconds))
+	}
+	if s.AutoContextEnabled != nil {
+		add("auto_context_enabled", fmt.Sprintf("%v", *s.AutoContextEnabled))
+	}
+	if s.AutoContextTopK > 0 {
+		add("auto_context_top_k", strconv.Itoa(s.AutoContextTopK))
+	}
+	if s.AutoContextMinScore > 0 {
+		add("auto_context_min_score", strconv.FormatFloat(s.AutoContextMinScore, 'g', -1, 64))
+	}
+	if s.AutoContextMaxChars > 0 {
+		add("auto_context_max_chars", strconv.Itoa(s.AutoContextMaxChars))
 	}
 
 	want := make(map[string]string, len(desired))
@@ -411,6 +448,29 @@ func Save(s *Settings) error {
 			"# Total on-disk budget for cache blobs before least-recently-used eviction.",
 			"# 1073741824 = 1 GiB. Use -1 for unbounded.",
 			"cache_max_bytes=1073741824",
+			"",
+			"# Note: a progress bar is always shown on stderr (regardless of --verbose)",
+			"# while files are being embedded — this isn't independently configurable,",
+			"# since it reflects real work happening, not a debug trace to opt out of.",
+			"",
+			"# ── Auto-context (RAG-before-answering) ──────────────────────────────────────",
+			"# Automatically embed every user turn and inject the most relevant passages",
+			"# into the conversation before the model responds, instead of relying on the",
+			"# model to call search itself. Uses the same parallel indexing + progress bar",
+			"# as an explicit semantic search.",
+			"auto_context_enabled=true",
+			"",
+			"# Max passages injected per turn.",
+			"auto_context_top_k=5",
+			"",
+			"# Minimum similarity score (0-1) a passage needs to be injected; below this,",
+			"# nothing is injected rather than forcing irrelevant chunks into every turn.",
+			"# Must be > 0 (0 falls back to the built-in default, it does not disable the",
+			"# floor) — there is no way to inject unconditionally regardless of relevance.",
+			"auto_context_min_score=0.2",
+			"",
+			"# Max combined characters injected per turn across all passages.",
+			"auto_context_max_chars=6000",
 			"",
 			"# ── Tool limits (0 = use built-in default) ───────────────────────────────────",
 			"# Max bytes read() returns for a single text file. -1 = unlimited.",
@@ -596,6 +656,27 @@ func ApplyDefaults(s *Settings) bool {
 		s.FetchURLTimeoutSeconds = 30
 		modified = true
 	}
+	// AutoContextEnabled: default true (auto-retrieval on by default, per design)
+	if s.AutoContextEnabled == nil {
+		t := true
+		s.AutoContextEnabled = &t
+		modified = true
+	}
+	// AutoContextTopK: default 5 passages per turn
+	if s.AutoContextTopK == 0 {
+		s.AutoContextTopK = 5
+		modified = true
+	}
+	// AutoContextMinScore: default 0.2 relevance floor
+	if s.AutoContextMinScore == 0 {
+		s.AutoContextMinScore = 0.2
+		modified = true
+	}
+	// AutoContextMaxChars: default 6000 combined characters per turn
+	if s.AutoContextMaxChars == 0 {
+		s.AutoContextMaxChars = 6000
+		modified = true
+	}
 
 	// NumCtx (0) and KeepAlive ("") intentionally left as "server default".
 
@@ -661,6 +742,16 @@ var ConfigDefs = []ConfigDef{
 		Description: "Encrypt cached text blobs at rest with AES-256-GCM. Strongly recommended."},
 	{Key: "cache_max_bytes", Type: "int64", Section: "Semantic-search cache", Hot: false,
 		Description: "Total on-disk cache budget before LRU eviction. 1073741824 = 1 GiB. -1 = unbounded."},
+
+	// ── Auto-context (RAG) ───────────────────────────────────────────────────
+	{Key: "auto_context_enabled", Type: "bool", Section: "Auto-context", Hot: true,
+		Description: "Automatically embed each user turn and inject relevant passages before the model responds, instead of relying on the model to call search."},
+	{Key: "auto_context_top_k", Type: "int", Section: "Auto-context", Hot: true,
+		Description: "Max passages injected per turn."},
+	{Key: "auto_context_min_score", Type: "float64", Section: "Auto-context", Hot: true,
+		Description: "Minimum similarity score (0-1) a passage needs to be injected; below this, nothing is injected."},
+	{Key: "auto_context_max_chars", Type: "int", Section: "Auto-context", Hot: true,
+		Description: "Max combined characters injected per turn across all passages."},
 
 	// ── Tool limits ───────────────────────────────────────────────────────────
 	{Key: "max_read_bytes", Type: "int", Section: "Tool limits", Hot: true,
@@ -768,6 +859,17 @@ func GetCurrentValue(s *Settings, key string) string {
 		return strconv.Itoa(s.FetchURLMaxBytes)
 	case "fetch_url_timeout_seconds":
 		return strconv.Itoa(s.FetchURLTimeoutSeconds)
+	case "auto_context_enabled":
+		if s.AutoContextEnabled == nil {
+			return ""
+		}
+		return strconv.FormatBool(*s.AutoContextEnabled)
+	case "auto_context_top_k":
+		return strconv.Itoa(s.AutoContextTopK)
+	case "auto_context_min_score":
+		return strconv.FormatFloat(s.AutoContextMinScore, 'g', -1, 64)
+	case "auto_context_max_chars":
+		return strconv.Itoa(s.AutoContextMaxChars)
 	}
 	return ""
 }
@@ -921,6 +1023,30 @@ func SetField(s *Settings, key, value string) error {
 			return fmt.Errorf("fetch_url_timeout_seconds: must be a positive integer, got %q", value)
 		}
 		s.FetchURLTimeoutSeconds = n
+	case "auto_context_enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("auto_context_enabled: must be true or false, got %q", value)
+		}
+		s.AutoContextEnabled = &b
+	case "auto_context_top_k":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("auto_context_top_k: must be a positive integer, got %q", value)
+		}
+		s.AutoContextTopK = n
+	case "auto_context_min_score":
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil || f <= 0 || f > 1 {
+			return fmt.Errorf("auto_context_min_score: must be a number in (0, 1], got %q", value)
+		}
+		s.AutoContextMinScore = f
+	case "auto_context_max_chars":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("auto_context_max_chars: must be a positive integer, got %q", value)
+		}
+		s.AutoContextMaxChars = n
 	default:
 		return fmt.Errorf("unknown config key %q; run /config to list all valid keys", key)
 	}

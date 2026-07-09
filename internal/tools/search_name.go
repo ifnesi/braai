@@ -28,7 +28,7 @@ func (r *Registry) searchName(args map[string]any) (Result, error) {
 		if path == r.root.Abs() {
 			return nil
 		}
-		if d.IsDir() && skipDirNames[d.Name()] {
+		if d.IsDir() && SkipDirNames[d.Name()] {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() && !extensionMatches(d.Name(), extensions) {

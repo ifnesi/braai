@@ -39,12 +39,12 @@ func (r *Registry) searchContent(args map[string]any) (Result, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != r.root.Abs() && skipDirNames[d.Name()] {
+			if path != r.root.Abs() && SkipDirNames[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if skipDirNames[d.Name()] {
+		if SkipDirNames[d.Name()] {
 			return nil
 		}
 

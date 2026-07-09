@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 
 	"braai/internal/cache"
 	"braai/internal/ollama"
@@ -12,10 +13,12 @@ import (
 	"braai/internal/textextract"
 )
 
-// Directories that are skipped by recursive/search operations because they
-// are typically large, generated, or version-control internals. This list is
-// intentionally hardcoded for simplicity; adjust here if usability demands.
-var skipDirNames = map[string]bool{
+// SkipDirNames lists directories skipped by recursive/search operations
+// because they are typically large, generated, or version-control
+// internals. This list is intentionally hardcoded for simplicity; adjust
+// here if usability demands. Exported so main.go's /tree command can reuse
+// it instead of maintaining its own copy.
+var SkipDirNames = map[string]bool{
 	".git":         true,
 	"node_modules": true,
 	"vendor":       true,
@@ -129,6 +132,38 @@ type Registry struct {
 	// search_semantic and get_chunk. Nil disables persistence (semantic
 	// search still works, re-embedding each run). Set via SetCache.
 	semanticCache *cache.Cache
+
+	// indexProgress, when set via SetIndexProgress, is invoked while
+	// search_semantic embeds files not yet cached, so a caller can render a
+	// progress indicator. It may be called concurrently by the worker pool
+	// in embedAndScoreFiles, so calls to it are serialized via
+	// indexProgressMu — implementations don't need their own locking.
+	indexProgress   IndexProgressFunc
+	indexProgressMu sync.Mutex
+}
+
+// IndexProgressFunc reports progress while search_semantic embeds files that
+// aren't yet cached. done is the number of files processed so far (embedded
+// or served from cache); total is how many eligible files this search will
+// process overall.
+type IndexProgressFunc func(done, total int)
+
+// SetIndexProgress registers fn to be called as search_semantic processes
+// files. Passing nil disables progress reporting (the default).
+func (r *Registry) SetIndexProgress(fn IndexProgressFunc) {
+	r.indexProgress = fn
+}
+
+// reportIndexProgress invokes the registered progress callback, if any,
+// serialized so concurrent callers (the embedAndScoreFiles worker pool)
+// don't need to coordinate among themselves.
+func (r *Registry) reportIndexProgress(done, total int) {
+	if r.indexProgress == nil {
+		return
+	}
+	r.indexProgressMu.Lock()
+	r.indexProgress(done, total)
+	r.indexProgressMu.Unlock()
 }
 
 type embedCacheEntry struct {

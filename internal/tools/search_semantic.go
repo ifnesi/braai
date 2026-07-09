@@ -7,7 +7,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"braai/internal/cache"
 )
@@ -15,6 +18,11 @@ import (
 // maxTotalChunks bounds how many chunks (across all files) one search_semantic
 // call will score, to cap latency/memory on very large trees.
 const maxTotalChunks = 5000
+
+// maxIndexWorkers caps the embedding worker pool regardless of core count, so
+// a huge tree doesn't spawn dozens of concurrent pdftotext subprocesses (each
+// a process spawn with its own memory) at once.
+const maxIndexWorkers = 8
 
 type semanticMatch struct {
 	Path       string  `json:"path"`
@@ -64,45 +72,9 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 		return textResult(`{"matches":[],"note":"no eligible files found"}`), nil
 	}
 
-	var matches []semanticMatch
-	total := 0
-	chunksTruncated := false
-
-	for _, absPath := range paths {
-		info, statErr := os.Stat(absPath)
-		if statErr != nil {
-			continue
-		}
-		relPath := r.root.RelPath(absPath)
-		mtimeNS := info.ModTime().UnixNano()
-		size := info.Size()
-
-		metas, err := r.semanticChunkMetas(ctx, relPath, absPath, mtimeNS, size)
-		if err != nil {
-			return Result{}, err
-		}
-		if len(metas) == 0 {
-			continue
-		}
-		if total+len(metas) > maxTotalChunks {
-			chunksTruncated = true
-			break
-		}
-		total += len(metas)
-
-		for i := range metas {
-			score := dot(queryVec, normalize(metas[i].Embedding))
-			if score < threshold {
-				continue
-			}
-			matches = append(matches, semanticMatch{
-				Path:       relPath,
-				ChunkIndex: metas[i].Index,
-				Section:    metas[i].Section,
-				Score:      score,
-				Excerpt:    metas[i].Excerpt,
-			})
-		}
+	matches, chunksTruncated, err := r.embedAndScoreFiles(ctx, paths, queryVec, threshold)
+	if err != nil {
+		return Result{}, err
 	}
 
 	sort.Slice(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
@@ -126,6 +98,117 @@ func (r *Registry) searchSemantic(ctx context.Context, args map[string]any) (Res
 		return Result{}, jsonErr
 	}
 	return textResult(string(out)), nil
+}
+
+// embedAndScoreFiles embeds (or reuses cached embeddings for) every file in
+// paths and scores each chunk against queryVec, using a bounded worker pool
+// so extraction/embedding for files not yet cached run concurrently instead
+// of one file at a time. This is safe to parallelize because: the static
+// embedding model only reads its loaded weights during Embed (no shared
+// mutable state to race on); ChunkEmbedder guards its in-memory cache with
+// its own RWMutex; and the persistent cache guards Get/Put with its own
+// mutex — none of the code this touches needs additional locking here.
+// Reports progress via r.reportIndexProgress after each file completes,
+// regardless of completion order.
+func (r *Registry) embedAndScoreFiles(ctx context.Context, paths []string, queryVec []float32, threshold float64) ([]semanticMatch, bool, error) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > maxIndexWorkers {
+		workers = maxIndexWorkers
+	}
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		matches   []semanticMatch
+		matchesMu sync.Mutex
+		chunkSum  atomic.Int64
+		truncated atomic.Bool
+		done      atomic.Int64
+		firstErr  error
+		errOnce   sync.Once
+	)
+	total := len(paths)
+	r.reportIndexProgress(0, total)
+
+	pathCh := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for absPath := range pathCh {
+				// ctx cancelled or the soft chunk cap already hit: drain the
+				// channel without doing more extraction/embedding work.
+				if ctx.Err() != nil || truncated.Load() {
+					r.reportIndexProgress(int(done.Add(1)), total)
+					continue
+				}
+
+				relPath := r.root.RelPath(absPath)
+				info, statErr := os.Stat(absPath)
+				if statErr != nil {
+					r.reportIndexProgress(int(done.Add(1)), total)
+					continue
+				}
+
+				metas, mErr := r.semanticChunkMetas(ctx, relPath, absPath, info.ModTime().UnixNano(), info.Size())
+				if mErr != nil {
+					errOnce.Do(func() { firstErr = mErr })
+					r.reportIndexProgress(int(done.Add(1)), total)
+					continue
+				}
+
+				if len(metas) > 0 {
+					if chunkSum.Add(int64(len(metas))) > maxTotalChunks {
+						truncated.Store(true)
+					}
+					var local []semanticMatch
+					for i := range metas {
+						score := dot(queryVec, normalize(metas[i].Embedding))
+						if score < threshold {
+							continue
+						}
+						local = append(local, semanticMatch{
+							Path:       relPath,
+							ChunkIndex: metas[i].Index,
+							Section:    metas[i].Section,
+							Score:      score,
+							Excerpt:    metas[i].Excerpt,
+						})
+					}
+					if len(local) > 0 {
+						matchesMu.Lock()
+						matches = append(matches, local...)
+						matchesMu.Unlock()
+					}
+				}
+				r.reportIndexProgress(int(done.Add(1)), total)
+			}
+		}()
+	}
+
+feed:
+	for _, p := range paths {
+		select {
+		case <-ctx.Done():
+			break feed
+		case pathCh <- p:
+		}
+	}
+	close(pathCh)
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, false, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return matches, truncated.Load(), nil
 }
 
 // semanticChunkMetas returns the chunk metadata (with normalized embeddings) for
@@ -191,12 +274,12 @@ func (r *Registry) collectSemanticFiles(extensions []string) ([]string, bool, er
 			return nil
 		}
 		if d.IsDir() {
-			if path != r.root.Abs() && skipDirNames[d.Name()] {
+			if path != r.root.Abs() && SkipDirNames[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if skipDirNames[d.Name()] || !extensionMatches(d.Name(), extensions) {
+		if SkipDirNames[d.Name()] || !extensionMatches(d.Name(), extensions) {
 			return nil
 		}
 		info, statErr := d.Info()

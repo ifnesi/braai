@@ -92,7 +92,7 @@ func (r *Registry) listDir(args map[string]any) (Result, error) {
 
 	var withTimes []dirEntryWithTime
 	err = walkLimited(absPath, 1, depth, func(p string, d os.DirEntry, curDepth int) error {
-		if skipDirNames[d.Name()] {
+		if SkipDirNames[d.Name()] {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

@@ -12,6 +12,105 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.4.0] - 2026-07-09
+---------------------
+
+Security
+  - fetch_url SSRF protection: outbound requests now resolve through a
+    custom dialer that refuses to connect to loopback, private (RFC1918),
+    link-local (including the 169.254.169.254 cloud metadata address), and
+    other reserved IP ranges — regardless of hostname. The check re-runs on
+    every redirect hop (not just the initial URL) and dials the resolved IP
+    directly to avoid a DNS-rebinding TOCTOU window. This closes a gap where
+    a model — potentially steered by content it had already fetched, i.e.
+    prompt injection — could reach cloud metadata endpoints or internal
+    network services even with fetch_url_https_only enabled, since HTTPS
+    alone doesn't prevent reaching internal hosts.
+  - fetch_url_enabled is now enforced inside the tool itself, not only by
+    omitting it from the model's tool list. Matches the existing defense-in-
+    depth pattern used by read_image for vision-capability gating, so a
+    hallucinated or replayed tool call by name can't bypass the opt-in gate.
+
+Added
+  - Auto-context (RAG-before-answering): every user turn is now automatically
+    embedded and matched against the working directory, and the most
+    relevant passages are injected into the conversation before the model
+    responds — instead of relying on the model to choose to call search
+    itself. This is a new tools.Registry.AutoContext method reusing the
+    parallel indexing pipeline below. Injected as a synthetic assistant
+    tool_calls + tool-result message pair (the same shape a real
+    search(semantic=true) call would leave in history), not a lone
+    unsolicited message — testing found at least one model (gemma4:e4b)
+    silently ignored correctly-retrieved, clearly relevant content when it
+    arrived as an orphan tool message, apparently because the system prompt
+    telling every model "if you have not seen something via a tool call,
+    you do not know it" makes a rule-following model distrust content it
+    never asked for. Framing it as a call the model "made" fixed this,
+    verified against two different local models end to end.
+    New settings (braai.conf / /config), all hot-applicable:
+      - auto_context_enabled (default true)
+      - auto_context_top_k (default 5)
+      - auto_context_min_score (default 0.2) — relevance floor; below this,
+        nothing is injected rather than forcing irrelevant chunks into
+        unrelated turns (e.g. a pasted stack trace)
+      - auto_context_max_chars (default 6000)
+    Chunks already injected earlier in a conversation are excluded from
+    later turns (no repeats); /clear resets this along with history.
+  - Parallel indexing: search_semantic (and auto-context, which shares the
+    pipeline) now embeds files not yet cached using a bounded worker pool
+    instead of one file at a time. Matters most for PDF/Office documents,
+    where extraction shells out to pdftotext and dominates per-file cost far
+    more than embedding itself. Safe by construction: the static embedding
+    model only reads its loaded weights (no shared mutable state), the
+    in-memory chunk-embedder cache already had its own RWMutex, and the
+    persistent on-disk cache already guarded Get/Put with its own mutex —
+    none of the code this touches needed new locking. A live progress bar
+    is always shown on stderr while embedding runs, regardless of --verbose
+    and not independently configurable — it reflects real work happening,
+    not a debug trace to opt out of.
+  - Test coverage for fetch_url: SSRF blocking (loopback/private/link-local
+    addresses), the enabled-flag gate, HTTPS-only rejection and redirect-
+    downgrade blocking, 32 KiB extraction truncation, mislabeled-HTML
+    sniffing, non-2xx surfacing, and context cancellation.
+  - "── Response ──" divider printed live at the start of every streamed
+    content segment, in bold cyan. Fixes interim commentary the model prints
+    right before calling a tool being visually indistinguishable from the
+    actual final answer (both rendered in the terminal's default color).
+    Printed unconditionally at the start of each segment rather than only
+    before the one that turns out final: which segment is "the answer" is
+    only knowable once the full response is parsed (after it has already
+    streamed), so predicting it live would require either buffering
+    (sacrificing live streaming) or erasing/reprinting already-drawn terminal
+    output (fragile cursor math, breaks on resize) — marking every segment's
+    start is simple, always correct, and gives an unambiguous boundary
+    either way, even in the case that produces two dividers in one turn.
+  - Elapsed turn time printed after the Sources footer (or on its own line
+    if there were no citations), in cyan, in both one-shot and interactive
+    chat mode, e.g. "9.4s". Sub-10-second durations show one decimal place;
+    longer ones round to whole seconds.
+
+Fixed
+  - The verbose tool-call "result: ..." preview line (and "attached N
+    image(s)") had no color applied at all, so on most dark-background
+    terminals it rendered in the same default bright color as the model's
+    actual answer text, despite being grouped with the yellow tool-trace
+    lines around it. Now dimmed, consistent with the rest of that group.
+  - fetch_url now sniffs the response body for an HTML doctype/tag when
+    Content-Type is missing or generic, so mislabeled HTML pages still get
+    readability + Markdown extraction instead of being returned as raw markup.
+  - /tree <glob> now resolves its directory argument through the same
+    working-directory confinement every model tool uses, so a pattern like
+    /tree ../../ can no longer walk the REPL outside the working directory.
+  - The directory skip-list (.git, node_modules, vendor, .idea, .DS_Store)
+    was duplicated in three places (internal/tools, and twice in main.go).
+    Exported tools.SkipDirNames and pointed both main.go call sites at it,
+    so the list can no longer drift out of sync between /tree and the tools.
+
+Changed
+  - build.sh now fails fast with a clear message if any file isn't
+    gofmt-formatted, instead of relying on manual review to catch it.
+
+
 [0.3.0] - 2026-07-07
 ---------------------
 

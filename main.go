@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/chzyer/readline"
 
@@ -32,7 +33,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.3.0"
+const version = "0.4.0"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -295,7 +296,7 @@ Flags:
 	}
 
 	if initialPrompt != "" {
-		return runOnce(ctx, session.ag, initialPrompt, stdout, jsonOutput)
+		return runOnce(ctx, session, initialPrompt, stdout, jsonOutput)
 	}
 
 	return runChat(ctx, session, jsonOutput)
@@ -371,6 +372,53 @@ func newChatSession(opts chatSessionOptions) *chatSession {
 	}
 }
 
+// newIndexProgressPrinter returns a tools.IndexProgressFunc that renders a
+// live progress bar to w while search_semantic embeds files not yet cached
+// (e.g. the first semantic search in a fresh working directory, or after
+// many files changed). Shown regardless of --verbose and unconditionally —
+// like the embedding-model download spinner in run(), this is a user-facing
+// wait indicator, not a debug trace, and not independently configurable:
+// whenever indexing actually runs, the user sees it happening.
+//
+// The callback is invoked by Registry.reportIndexProgress, which serializes
+// calls with its own mutex even though embedding runs on a worker pool, so
+// this function doesn't need any locking of its own. done==0 always marks
+// the start of a call (embedAndScoreFiles reports it once, synchronously,
+// before spawning workers) and done==total marks the one call that observed
+// the final file complete, so both edges are reliable without extra state.
+func newIndexProgressPrinter(w io.Writer, lv terminal.Level) tools.IndexProgressFunc {
+	if lv == terminal.None {
+		// Non-terminal stderr (redirected/piped): a \r-overwritten bar would
+		// spam a log file with one line per file, so print just a start and
+		// a completion note instead.
+		return func(done, total int) {
+			if total <= 0 {
+				return
+			}
+			switch {
+			case done == 0:
+				fmt.Fprintf(w, "Indexing %d file(s) for semantic search...\n", total)
+			case done >= total:
+				fmt.Fprintln(w, "Indexing complete.")
+			}
+		}
+	}
+
+	const barWidth = 24
+	return func(done, total int) {
+		if total <= 0 {
+			return
+		}
+		if done >= total {
+			fmt.Fprint(w, "\r\x1b[2K") // clear the line rather than leave a stale 100% bar
+			return
+		}
+		filled := done * barWidth / total
+		bar := strings.Repeat("#", filled) + strings.Repeat("-", barWidth-filled)
+		fmt.Fprintf(w, "\r\x1b[2K%s", terminal.Dim(lv, fmt.Sprintf("Indexing files: [%s] %d/%d", bar, done, total)))
+	}
+}
+
 // switchModel rebuilds the tool registry and agent for model (re-checking
 // vision support and context length, since both are model-specific) and
 // persists it to ~/.braai/braai.conf as the new default.
@@ -392,6 +440,11 @@ func (s *chatSession) switchModel(ctx context.Context, model string) error {
 	}
 	registry := tools.NewRegistry(s.root, s.limits, info.HasCapability("vision"), fetchCfg, embedClient, s.embedModel)
 	registry.SetCache(s.cache)
+	// Always wired up, not gated by a setting: whenever indexing actually
+	// runs (explicit search or auto-context), the user sees it happening —
+	// that's a transparency/fair-use property, not a preference to opt out
+	// of independently of whether the work itself happens.
+	registry.SetIndexProgress(newIndexProgressPrinter(s.verboseWriter, terminal.Detect(s.verboseWriter)))
 	ag := agent.New(s.client, registry, agent.Options{
 		Model:         model,
 		MaxToolCalls:  s.maxToolCalls,
@@ -460,6 +513,14 @@ func (s *chatSession) applyConfigField(ctx context.Context, key string) error {
 		"fetch_url_timeout_seconds":
 		// fetch_url config is read directly from s.settings in switchModel;
 		// no local field update needed — just fall through to the rebuild below.
+	case "auto_context_enabled",
+		"auto_context_top_k",
+		"auto_context_min_score",
+		"auto_context_max_chars":
+		// maybeInjectAutoContext reads these straight from s.settings on every
+		// turn, so no agent/registry rebuild (and the Ollama round-trip that
+		// entails) is needed at all — unlike the tool-limit keys above.
+		return nil
 	}
 	return s.switchModel(ctx, s.model)
 }
@@ -494,23 +555,86 @@ func resolveModel(ctx context.Context, client *ollama.Client, flagModel string, 
 // directly to stdout by ag.Run as it arrives, so nothing further is printed;
 // in JSON mode ag.Run's Stdout was set to io.Discard by the caller, so the
 // buffered result is printed here instead.
-func runOnce(ctx context.Context, ag *agent.Agent, prompt string, stdout io.Writer, jsonOutput bool) error {
+func runOnce(ctx context.Context, session *chatSession, prompt string, stdout io.Writer, jsonOutput bool) error {
 	history := []ollama.Message{
 		agent.SystemMessage(),
 		{Role: "user", Content: prompt},
 	}
-	result, err := ag.Run(ctx, history)
+	// A one-shot invocation is a single turn, so there's no prior conversation
+	// to dedupe against — a fresh, empty exclude set is correct here.
+	history = maybeInjectAutoContext(ctx, session.registry, session.settings, history, prompt, map[string]bool{})
+
+	start := time.Now()
+	result, err := session.ag.Run(ctx, history)
+	elapsed := time.Since(start)
 	if err != nil {
 		return err
 	}
 	if jsonOutput {
 		return printJSONResult(stdout, result)
 	}
-	// Print citations footer in text mode.
+	// Print citations + elapsed-time footer in text mode.
+	fmt.Fprintln(stdout)
 	if citations := extractCitations(result.ToolCalls); len(citations) > 0 {
-		fmt.Fprintf(stdout, "\n  Sources: %s\n", strings.Join(citationLinks(citations), " "))
+		fmt.Fprintf(stdout, "  Sources: %s\n", strings.Join(citationLinks(citations), " "))
 	}
+	fmt.Fprintf(stdout, "  %s\n", terminal.Cyan(session.colorLevel, formatElapsed(elapsed)))
 	return nil
+}
+
+// maybeInjectAutoContext calls registry.AutoContext for the user's latest
+// message and, if it returns non-empty text, appends a synthetic pair of
+// messages to history — an assistant message requesting a "search" tool
+// call, followed by the "tool" role result — so the model sees relevant
+// passages before responding, without having to call search itself.
+//
+// This mimics the exact shape a real search_semantic call would leave in
+// history (assistant tool_calls, then a tool result), rather than a lone
+// unsolicited "tool" message. That distinction matters: testing found that
+// at least one model (gemma4:e4b) silently ignored a correctly-retrieved,
+// clearly relevant chunk when it arrived as an orphan tool message — almost
+// certainly because the system prompt tells every model "if you have not
+// seen something via a tool call, you do not know it," so a rule-following
+// model can (correctly, per that instruction) distrust content it never
+// asked for. Framing it as a call the model "made" sidesteps that.
+//
+// injected tracks chunk keys ("path#chunk_index") already shown earlier in
+// this conversation, so the same passage isn't repeated turn after turn;
+// callers own that map's lifetime (reset it whenever they reset history,
+// e.g. on /clear).
+//
+// No-ops (returns history unchanged) when auto_context_enabled is false, no
+// embedding backend is configured, the working directory has no eligible
+// files, or nothing scored above the relevance threshold — see
+// tools.Registry.AutoContext for the exact conditions. Errors from
+// AutoContext itself (e.g. an embedding request failing) are swallowed
+// rather than aborting the turn: auto-context is a best-effort enhancement,
+// not something that should turn a working conversation into a hard failure.
+func maybeInjectAutoContext(ctx context.Context, registry *tools.Registry, settings *config.Settings, history []ollama.Message, userMsg string, injected map[string]bool) []ollama.Message {
+	if settings.AutoContextEnabled == nil || !*settings.AutoContextEnabled {
+		return history
+	}
+	result, err := registry.AutoContext(ctx, userMsg, settings.AutoContextTopK, settings.AutoContextMinScore, settings.AutoContextMaxChars, injected)
+	if err != nil || result.Text == "" {
+		return history
+	}
+	for _, k := range result.Keys {
+		injected[k] = true
+	}
+	return append(history,
+		ollama.Message{
+			Role: "assistant",
+			ToolCalls: []ollama.ToolCall{{Function: ollama.ToolCallFunction{
+				Name:      "search",
+				Arguments: map[string]any{"query": userMsg, "semantic": true},
+			}}},
+		},
+		ollama.Message{
+			Role:     "tool",
+			Content:  result.Text,
+			ToolName: "search",
+		},
+	)
 }
 
 // printJSONResult encodes an agent.RunResult as a single compact JSON
@@ -557,10 +681,10 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 
 	promptNormal := promptForMode(session.colorLevel, session.settings.Mode)
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:        promptNormal,
-		HistoryLimit:  readlineHistoryLimit,
-		HistoryFile:   "", // Empty disables readline's file persistence; we manage history ourselves
-		AutoComplete:  &braaiCompleter{root: session.root},
+		Prompt:       promptNormal,
+		HistoryLimit: readlineHistoryLimit,
+		HistoryFile:  "", // Empty disables readline's file persistence; we manage history ourselves
+		AutoComplete: &braaiCompleter{root: session.root},
 	})
 	if err != nil {
 		return fmt.Errorf("start interactive prompt: %w", err)
@@ -608,6 +732,12 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 	fmt.Fprintln(rl.Stdout())
 
 	history := []ollama.Message{agent.SystemMessage()}
+	// injected tracks auto-context chunk keys ("path#chunk_index") already
+	// shown this conversation, so the same passage isn't repeated turn after
+	// turn. Reset alongside history whenever /clear starts a fresh
+	// conversation — a chunk the model has "forgotten" should be eligible
+	// for re-injection.
+	injected := map[string]bool{}
 	for {
 		rl.SetPrompt(promptForMode(session.colorLevel, session.settings.Mode)) // reset to normal after any previous error
 		line, err := rl.Readline()
@@ -653,6 +783,9 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 				fmt.Fprintf(rl.Stdout(), "%s\n\n", terminal.Dim(session.colorLevel, expanded))
 				line = expanded // submit the expanded template as this turn's prompt
 			} else {
+				if line == "/clear" {
+					injected = map[string]bool{}
+				}
 				history = handleSlashCommand(ctx, rl, line, history, session)
 				continue
 			}
@@ -670,6 +803,7 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 		}
 
 		history = append(history, ollama.Message{Role: "user", Content: expanded})
+		history = maybeInjectAutoContext(ctx, session.registry, session.settings, history, expanded, injected)
 		// In text mode the answer streams straight to stdout as it arrives;
 		// in JSON mode it was buffered (Stdout was io.Discard) and is
 		// printed here instead. session.ag is re-read fresh each turn since
@@ -693,7 +827,9 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 			}
 		}()
 
+		start := time.Now()
 		result, err := session.ag.Run(runCtx, history)
+		elapsed := time.Since(start)
 		signal.Stop(sigChan)
 		cancel()
 
@@ -715,12 +851,14 @@ func runChat(ctx context.Context, session *chatSession, jsonOutput bool) error {
 				fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Red(session.colorLevel, "error encoding JSON output: "+err.Error()))
 			}
 		} else {
-			// Print a dim citations footer when any file-reading tools were used.
+			// Print a dim citations footer when any file-reading tools were used,
+			// then how long the turn took.
 			if citations := extractCitations(result.ToolCalls); len(citations) > 0 {
 				links := citationLinks(citations)
 				fmt.Fprintf(rl.Stdout(), "%s\n", terminal.Dim(session.colorLevel,
 					"  Sources: "+strings.Join(links, " ")))
 			}
+			fmt.Fprintf(rl.Stdout(), "  %s\n", terminal.Cyan(session.colorLevel, formatElapsed(elapsed)))
 		}
 		history = result.History
 	}
@@ -762,7 +900,6 @@ func printHelp(out io.Writer, colorLevel terminal.Level) {
 		fmt.Fprintf(out, "  %s%s%s\n", terminal.Bold(colorLevel, e.cmd), pad, e.desc)
 	}
 }
-
 
 // handleSlashCommand processes a chat REPL command (a line starting with
 // "/") and returns the (possibly modified) history to continue the loop
@@ -948,9 +1085,18 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 				globDir = ""
 			}
 
+			// Resolve through session.root rather than a raw filepath.Join, so
+			// a pattern like "/tree ../../etc*" can't walk the REPL outside
+			// the working directory (the same confinement every model tool
+			// already gets via security.Root).
 			searchRoot := session.workingDir
 			if globDir != "" {
-				searchRoot = filepath.Join(searchRoot, globDir)
+				resolved, rerr := session.root.Resolve(globDir)
+				if rerr != nil {
+					fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, rerr.Error()))
+					return history
+				}
+				searchRoot = resolved
 			}
 
 			entries, err := os.ReadDir(searchRoot)
@@ -958,14 +1104,10 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not read directory: "+err.Error()))
 				return history
 			}
-			skipNames := map[string]bool{
-				".git": true, "node_modules": true, "vendor": true,
-				".idea": true, ".DS_Store": true,
-			}
 			var matched []os.DirEntry
 			for _, e := range entries {
 				name := e.Name()
-				if skipNames[name] || strings.HasPrefix(name, ".") {
+				if tools.SkipDirNames[name] || strings.HasPrefix(name, ".") {
 					continue
 				}
 				ok, err := filepath.Match(nameGlob, name)
@@ -1414,8 +1556,8 @@ func expandAtTokens(line string, session *chatSession, out io.Writer) (string, e
 			i++
 			continue
 		}
-		token := string(runes[i:j])          // e.g. "@foo/bar\ baz.md"
-		escaped := token[1:]                  // strip leading @
+		token := string(runes[i:j])                       // e.g. "@foo/bar\ baz.md"
+		escaped := token[1:]                              // strip leading @
 		relPath := strings.ReplaceAll(escaped, `\ `, " ") // unescape spaces
 
 		if !seen[token] {
@@ -1608,6 +1750,20 @@ func (c citation) displayText() string {
 	return c.relPath
 }
 
+// formatElapsed renders a turn's wall-clock duration as a short, human
+// glance-able string: sub-10-second durations get one decimal place of
+// precision (e.g. "3.2s"), since that's the range where the difference
+// between e.g. 1s and 4s actually matters to the user; anything at or above
+// 10s rounds to whole seconds so the display doesn't jitter across nearly
+// every call.
+func formatElapsed(d time.Duration) string {
+	secs := d.Seconds()
+	if secs < 10 {
+		return fmt.Sprintf("%.1fs", secs)
+	}
+	return fmt.Sprintf("%.0fs", secs)
+}
+
 // extractCitations walks a slice of ToolCallRecords and returns a deduplicated,
 // sorted slice of citations for every file-reading tool call made during a Run.
 func extractCitations(calls []agent.ToolCallRecord) []citation {
@@ -1723,15 +1879,9 @@ func saveTranscriptJSON(path string, history []ollama.Message) error {
 
 // printTree renders the contents of dir as an ASCII tree, writing to out.
 // prefix is the indentation string for the current level (built up recursively).
-// showHidden controls whether dotfiles/dotdirs are included; entries in the
-// skipDirNames set are always omitted regardless of showHidden.
+// showHidden controls whether dotfiles/dotdirs are included; entries in
+// tools.SkipDirNames are always omitted regardless of showHidden.
 func printTree(out io.Writer, dir string, prefix string, showHidden bool) {
-	// Mirror the skip set from internal/tools without importing it.
-	skipNames := map[string]bool{
-		".git": true, "node_modules": true, "vendor": true,
-		".idea": true, ".DS_Store": true,
-	}
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fmt.Fprintf(out, "%s[error reading directory: %v]\n", prefix, err)
@@ -1742,7 +1892,7 @@ func printTree(out io.Writer, dir string, prefix string, showHidden bool) {
 	var visible []os.DirEntry
 	for _, e := range entries {
 		name := e.Name()
-		if skipNames[name] {
+		if tools.SkipDirNames[name] {
 			continue
 		}
 		if !showHidden && strings.HasPrefix(name, ".") {

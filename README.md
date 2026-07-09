@@ -111,6 +111,17 @@ In a real terminal, the reasoning trace is dimmed so it's visually distinct
 from the final answer; the dimming is skipped automatically when stdout is
 piped or redirected, so redirected output stays free of ANSI escape codes.
 
+Every block of model-generated text is preceded by a bold cyan `── Response ──`
+divider as it starts streaming. This includes the model's actual final
+answer, but also any commentary it streams before deciding to call a tool
+(e.g. "Let me check the other file first") — whether a given block turns out
+to be the final answer or not is only known once it's fully generated, so
+every block gets the same marker rather than guessing. In practice this means
+a turn with tool calls shows multiple dividers, each clearly bounding its own
+block, so it's always obvious where one piece of model output ends and the
+next begins. Once a turn finishes, how long it took is printed in cyan
+(e.g. `9.4s`) after any `Sources:` footer.
+
 With `--output json`, streaming is disabled and braai instead prints one
 JSON object per answer once it's complete:
 `{"answer": "...", "reasoning": "...", "tool_calls": [{"name": "...", "arguments": {...}, "result": "..."}]}`.
@@ -124,7 +135,7 @@ When braai starts an interactive session it prints a mascot alongside the
 session info:
 
 ```
- ╭◠◠◠◠◠╮    braai 0.3.0       
+ ╭◠◠◠◠◠╮    braai 0.4.0       
  |_____|    Working directory: .
  [◕ ‿ ◕]    Model: qwen3.6:35b-mlx
 <╞═════╡>   Licensed under the Apache License 2.0
@@ -331,6 +342,29 @@ cache_encryption=true
 # 1073741824 = 1 GiB. Use -1 for unbounded.
 cache_max_bytes=1073741824
 
+# Note: a progress bar is always shown on stderr (regardless of --verbose)
+# while files are being embedded — this isn't independently configurable,
+# since it reflects real work happening, not a debug trace to opt out of.
+
+# ── Auto-context (RAG-before-answering) ──────────────────────────────────────
+# Automatically embed every user turn and inject the most relevant passages
+# into the conversation before the model responds, instead of relying on the
+# model to call search itself. Uses the same parallel indexing + progress bar
+# as an explicit semantic search.
+auto_context_enabled=true
+
+# Max passages injected per turn.
+auto_context_top_k=5
+
+# Minimum similarity score (0-1) a passage needs to be injected; below this,
+# nothing is injected rather than forcing irrelevant chunks into every turn.
+# Must be > 0 (0 falls back to the built-in default, it does not disable the
+# floor) — there is no way to inject unconditionally regardless of relevance.
+auto_context_min_score=0.2
+
+# Max combined characters injected per turn across all passages.
+auto_context_max_chars=6000
+
 # ── Tool limits (0 = use built-in default) ───────────────────────────────────
 # Max bytes read() returns for a single text file. -1 = unlimited.
 max_read_bytes=-1
@@ -405,6 +439,15 @@ fetch_url_timeout_seconds=30
 - `cache_encryption` — Encrypt cache blobs at rest with AES-256-GCM (default: `true`). Key stored at `~/.braai/cache.key`.
 - `cache_max_bytes` — Total cache budget before LRU eviction (default: `1073741824` / 1 GiB)
 
+A progress bar is always shown on stderr while files are being embedded, regardless of `--verbose` — this isn't an independent setting, since it reflects real work happening, not a debug trace.
+
+**Auto-context (see [Auto-context](#auto-context-rag-before-answering) below):**
+
+- `auto_context_enabled` — Automatically embed each turn and inject relevant passages (default: `true`)
+- `auto_context_top_k` — Max passages injected per turn (default: `5`)
+- `auto_context_min_score` — Similarity floor (0–1) below which nothing is injected (default: `0.2`)
+- `auto_context_max_chars` — Max combined characters injected per turn (default: `6000`)
+
 **Tool limits (0 = built-in default):**
 
 - `max_read_bytes` — Max bytes for single text file (default: `-1` / unlimited)
@@ -476,9 +519,10 @@ List: what I did, what's next, and any blockers.
 File: `~/.braai/commands/tldr.md`
 ```markdown
 ---
-description: Summarize the previous answer in 3 bullets
+description: Summarize the previous answer in N bullet points (default 3)
+args: [count]
 ---
-Summarize the following in exactly three bullet points:
+Summarize the following in exactly N bullet points, where N is "$1" (use 3 if "$1" is blank):
 
 $SELECTION
 ```
@@ -569,6 +613,9 @@ manageable size for the model context window:
 explicitly set `fetch_url_enabled = true` in `~/.braai/braai.conf` (or via
 `/config fetch_url_enabled true`). This means that in the default configuration
 braai makes **no outbound HTTP requests** on behalf of the model whatsoever.
+The check is enforced twice: once by omitting the tool's schema from the
+model's tool list, and again inside the tool itself, so a hallucinated or
+replayed call by name can't bypass the opt-in gate.
 
 **HTTPS-only by default.** With `fetch_url_https_only = true` (the default):
 - Plain `http://` URLs are rejected at the tool level.
@@ -577,6 +624,18 @@ braai makes **no outbound HTTP requests** on behalf of the model whatsoever.
 
 Set `fetch_url_https_only = false` only when you need to reach local
 development servers or intranet URLs that do not support HTTPS.
+
+**SSRF protection.** Regardless of the HTTPS-only setting, every outbound
+connection — including each hop of a redirect chain — is resolved and
+checked before connecting: loopback (`127.0.0.1`, `::1`), private (RFC1918),
+link-local (including the `169.254.169.254` cloud metadata address), and
+other reserved ranges are refused, no matter what hostname resolves to them.
+This matters because the tool's own output (extracted page text) can carry
+prompt injection instructing a *later* turn to fetch an internal URL — HTTPS
+alone doesn't stop that, since internal services often speak HTTPS too. The
+resolved IP is dialed directly (rather than re-resolving the hostname at
+connect time) to avoid a DNS-rebinding gap between the check and the
+connection.
 
 All four `fetch_url_*` config keys are hot-applicable: `/config fetch_url_enabled true`
 takes effect immediately without restarting braai.
@@ -610,6 +669,16 @@ compressed (flate) and encrypted (AES-256-GCM) at rest by default. Only chunk
 metadata and embedding vectors live in memory; chunk text is read (and decrypted)
 from disk on demand, a few chunks at a time.
 
+**Parallel indexing.** Files not yet cached (a fresh working directory, or
+files that changed since the last search) are extracted and embedded
+concurrently by a bounded worker pool, instead of one file at a time — this
+matters most for PDF/Office documents, where extraction shells out to
+`pdftotext` and dominates the per-file cost far more than the embedding step
+itself. A live progress bar is always shown on stderr while this runs,
+regardless of `--verbose` — this isn't a setting to opt out of, it reflects
+real work happening. Once cached, a file is served straight from disk on
+every later search and isn't re-processed.
+
 **Invalidation and footprint.** A cache entry is rebuilt automatically when its
 file changes (mtime/size), when the embedding model changes, or when the on-disk
 format version changes; deleting `~/.braai/cache/` by hand is always safe. When
@@ -623,6 +692,52 @@ text). Encryption is on by default; see the security notes below for the key's
 threat model. Set `fetch_url_enabled = false` (the default) to prevent the
 model from making any outbound HTTP requests — when disabled, `fetch_url` is
 never advertised to the model and no network calls are made on its behalf.
+
+## Auto-context (RAG-before-answering)
+
+By default, braai doesn't wait for the model to decide it should search your
+files — every user turn is automatically embedded and matched against the
+working directory, and the most relevant passages are injected into the
+conversation *before* the model responds. This matters most for smaller
+local models, which don't always reliably choose to call `search` on their
+own even when the answer is sitting in a file right there in the working
+directory.
+
+**How it's injected.** The retrieved passages are added to the conversation
+as a synthetic `search` tool call and result — the same shape the
+conversation would have if the model had called `search(semantic=true)`
+itself. This isn't cosmetic: testing found that some models, when given the
+same content as a plain unsolicited message, ignored correctly-retrieved,
+clearly relevant passages entirely — almost certainly because braai's system
+prompt tells every model "if you have not seen something via a tool call,
+you do not know it," and a rule-following model can (correctly, per that
+instruction) distrust content it never asked for. Framing the injection as a
+call the model "made" itself avoids that. Because the injected result has
+the same `path` + `chunk_index` shape a real search returns, the model can
+still call `read`, `search`, or `get_chunk` itself for more detail on any
+passage.
+
+**No repeats.** Once a passage has been injected in a conversation, it's
+excluded from future turns' candidates — so a long conversation doesn't keep
+re-showing the same chunk. `/clear` resets this along with the conversation.
+
+**Relevance floor, not intent-guessing.** Rather than trying to detect "is
+this a document question" from the message text, auto-context relies purely
+on similarity score: if the best-matching passage scores below
+`auto_context_min_score` (default `0.2`), nothing is injected for that turn.
+This avoids forcing irrelevant chunks into every unrelated question (e.g. a
+pasted stack trace) without needing fragile heuristics.
+
+**Cost.** Every turn now costs one embedding call plus a cache lookup (fast
+once the working directory is indexed — see [Semantic search & caching](#semantic-search--caching)
+above), and up to `auto_context_max_chars` (default `6000`) of extra context
+per turn when something relevant is found. Set `auto_context_enabled = false`
+to fall back to the old model-initiated-only behavior.
+
+All four settings (`auto_context_enabled`, `auto_context_top_k`,
+`auto_context_min_score`, `auto_context_max_chars`) live in
+`~/.braai/braai.conf` / `/config` — see **Auto-context** under
+[Configuration file](#configuration-file) above.
 
 ## Security model
 

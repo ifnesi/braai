@@ -10,6 +10,15 @@ cd "$SCRIPT_DIR"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 BIN_NAME="braai"
 
+echo "==> Checking formatting"
+UNFORMATTED="$(gofmt -l .)"
+if [ -n "${UNFORMATTED}" ]; then
+	echo "The following files are not gofmt-formatted:"
+	echo "${UNFORMATTED}"
+	echo "Run: gofmt -w ."
+	exit 1
+fi
+
 echo "==> Running tests"
 go test ./...
 

@@ -12,6 +12,7 @@ import (
 const (
 	labelThinking     = "Thinking..."
 	labelDoneThinking = "...done thinking."
+	labelResponse     = "── Response ──"
 )
 
 // streamPrinter writes a model's streamed thinking/content deltas to an
@@ -28,6 +29,13 @@ type streamPrinter struct {
 	inCodeBlock bool
 	printedAny  bool
 	spinnerStop bool // true once we've stopped the spinner
+	// printedMarker is true once the "── Response ──" divider has been
+	// printed for the current turn's content. A streamPrinter is created
+	// fresh per turn (per iteration of Agent.Run's loop), so this can't leak
+	// across turns; see onChunk for why the divider is printed unconditionally
+	// at the start of every content segment rather than only before what
+	// turns out to be the final answer.
+	printedMarker bool
 	// trailingBacktick buffers an opening backtick if a chunk ends with one,
 	// so inline spans split across chunks can still be styled on the next chunk.
 	trailingBacktick string
@@ -92,9 +100,27 @@ func (p *streamPrinter) onChunk(chunk ollama.ChatResponse) {
 			p.inThinking = false
 		}
 
-		// Print empty line before content starts
-		if !p.printedAny {
-			fmt.Fprintln(p.out)
+		if !p.printedMarker {
+			// Print empty line before content starts (only needed here — if
+			// thinking ran first, its close-out above already left a blank
+			// line).
+			if !p.printedAny {
+				fmt.Fprintln(p.out)
+			}
+			// Deliberately printed at the start of EVERY content segment, not
+			// only the one that turns out to be the final answer: while this
+			// chunk is streaming, we can't yet know whether the model will
+			// also request tool calls after it (that's only known once the
+			// full response is parsed). Trying to predict that would mean
+			// either delaying/buffering output (losing live streaming) or
+			// erasing and reprinting once we find out (fragile terminal
+			// cursor math). Marking every content segment's start is simple,
+			// always correct, and gives an unambiguous boundary either way —
+			// if a model narrates before calling a tool and then gives a real
+			// answer, you see two dividers, each correctly bounding its own
+			// block, rather than one possibly-wrong guess.
+			fmt.Fprintln(p.out, terminal.Bold(p.colorLevel, terminal.Cyan(p.colorLevel, labelResponse)))
+			p.printedMarker = true
 		}
 
 		content := p.applyContentStyle(chunk.Message.Content)

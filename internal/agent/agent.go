@@ -374,8 +374,12 @@ func (a *Agent) logToolCall(tc ollama.ToolCall, result tools.Result, err error) 
 	if len(preview) > maxPreview {
 		preview = preview[:maxPreview] + "...(truncated in log)"
 	}
-	fmt.Fprintf(a.opts.VerboseWriter, "     result: %s\n", preview)
+	// Dimmed, not left in the terminal's default (usually bright) color: this
+	// is a tool-trace line, same category as the yellow lines above it, and
+	// should read as background detail rather than blend in with the model's
+	// actual answer text.
+	fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Dim(a.opts.ColorLevel, "     result: "+preview))
 	if len(result.Images) > 0 {
-		fmt.Fprintf(a.opts.VerboseWriter, "     attached %d image(s)\n", len(result.Images))
+		fmt.Fprintf(a.opts.VerboseWriter, "%s\n", terminal.Dim(a.opts.ColorLevel, fmt.Sprintf("     attached %d image(s)", len(result.Images))))
 	}
 }

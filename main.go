@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,7 +34,7 @@ import (
 )
 
 // version is the released version of braai, printed by --version.
-const version = "0.4.1"
+const version = "0.5.0"
 
 // digestPrompt is the fixed prompt submitted by --summarize / /digest.
 const digestPrompt = `Walk this working directory thoroughly and produce a structured project overview.
@@ -909,6 +910,8 @@ func printHelp(out io.Writer, colorLevel terminal.Level) {
 		{"/export json <file>", "save conversation as a JSON array"},
 		{"/copy [last]", "copy full conversation (or last answer) to clipboard"},
 		{"/cache [clear]", "show semantic-search cache stats (clear: wipe it)"},
+		{"/context", "show estimated context-window usage for this conversation"},
+		{"/compact [N]", "summarize the conversation to shrink context; keep last N user turns verbatim (default 0)"},
 		{"/cmd [<name> [args...]]", "run a custom prompt template (/cmd to list)"},
 		{"@<path>", "inline a file's content into the prompt sent to the model"},
 		{"", "  supported: text, PDF, Word, Excel, HTML, and more"},
@@ -928,6 +931,188 @@ func printHelp(out io.Writer, colorLevel terminal.Level) {
 		pad := strings.Repeat(" ", maxW-len(e.cmd)+2)
 		fmt.Fprintf(out, "  %s%s%s\n", terminal.Bold(colorLevel, e.cmd), pad, e.desc)
 	}
+}
+
+// formatTokenCount renders a token count compactly: "847" below 1000,
+// "12.4k" at or above it. Matches the style of the existing context-window
+// warning in agent.Run (e.g. "~12345 tokens" there is exact; this is the
+// compact form used for /context's table, where several rows are shown at
+// once and exactness is less important than being glanceable).
+func formatTokenCount(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+// contextBar renders a block-bar gauge of width cells representing ratio
+// (0-1, clamped), filled left-to-right — the same visual idiom as Claude
+// Code's /context command. Purely cosmetic; degrades to plain "#"/"-" ASCII
+// when colorLevel is None so piped/redirected output has no ANSI codes.
+func contextBar(ratio float64, width int, colorLevel terminal.Level) string {
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	filled := int(ratio * float64(width))
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	if colorLevel == terminal.None {
+		bar = strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+	}
+	return terminal.Cyan(colorLevel, "["+bar+"]")
+}
+
+// printContextReport renders /context's output: an estimated breakdown of
+// what's consuming the current conversation's context window. All figures
+// come from agent.BuildContextReport, which uses the same rough char-count
+// heuristic as the existing 80%-full warning in agent.Run — this is an
+// estimate, not an exact tokenizer count, and is labeled as such.
+func printContextReport(out io.Writer, session *chatSession, history []ollama.Message) {
+	lv := session.colorLevel
+	report := agent.BuildContextReport(session.model, session.modelInfo.ContextLength, history, session.registry.Definitions())
+
+	fmt.Fprintln(out, terminal.Bold(lv, "Context Usage (estimated)"))
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  Model: %s\n", terminal.Green(lv, session.model))
+	if report.ContextLength > 0 {
+		ratio := float64(report.Used) / float64(report.ContextLength)
+		fmt.Fprintf(out, "  Tokens: %s/%s (%.1f%%)\n",
+			formatTokenCount(report.Used), formatTokenCount(report.ContextLength), ratio*100)
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  "+contextBar(ratio, 30, lv))
+	} else {
+		// The server didn't report a context length for this model (e.g. no
+		// metadata available) — still show the breakdown, just without a
+		// ratio/bar that would need a denominator.
+		fmt.Fprintf(out, "  Tokens used: %s (context window unknown for this model)\n", formatTokenCount(report.Used))
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, terminal.Dim(lv, "  Estimated usage by category"))
+	rows := []struct {
+		label  string
+		tokens int
+	}{
+		{"System prompt", report.SystemPromptTokens},
+		{"Tool schemas", report.ToolSchemaTokens},
+		{"Conversation", report.ConversationTokens},
+	}
+	for _, row := range rows {
+		pct := ""
+		if report.ContextLength > 0 {
+			pct = fmt.Sprintf(" (%.1f%%)", float64(row.tokens)/float64(report.ContextLength)*100)
+		}
+		fmt.Fprintf(out, "    %s: %s tokens%s\n", row.label, formatTokenCount(row.tokens), pct)
+	}
+	if report.ContextLength > 0 {
+		pct := float64(report.Free) / float64(report.ContextLength) * 100
+		fmt.Fprintf(out, "    %s: %s tokens (%.1f%%)\n", terminal.Dim(lv, "Free space"), formatTokenCount(report.Free), pct)
+	}
+}
+
+// compactPromptSuffix is appended as a final user message when asking the
+// model to summarize the conversation so far, kept short and precise per
+// the same "don't let a long instruction confuse the model" principle
+// applied to custom commands.
+const compactPromptSuffix = "Summarize the conversation above concisely, preserving key facts, file paths referenced, and conclusions reached, so it can stand in for the full transcript."
+
+// compactHistory replaces everything in history before the keep-th most
+// recent user message with a single model-generated summary, to shrink the
+// context resent on every future request. keep=0 summarizes the entire
+// conversation (no messages kept verbatim); keep=N keeps the last N user
+// turns (and everything the model/tools produced in response to them)
+// untouched, summarizing only what came before them.
+//
+// This is a best-effort, lossy operation — a smaller local model may drop
+// nuance a larger one wouldn't — so the caller is told exactly how much was
+// folded into the summary and can decide whether the result looks right.
+// Returns history unchanged (with a message explaining why) if there's
+// nothing worth compacting: an empty conversation, or keep already
+// covering everything present.
+// compactCutIndex returns the index in history at which "the last keep user
+// turns" begins — everything at or after the returned index should be kept
+// verbatim; everything from index 1 (skipping the leading system message)
+// up to it should be summarized. A single user turn can expand into many
+// history entries (tool_calls/tool-result pairs, auto-context injections,
+// the final answer), so this counts *user*-role messages walking backward
+// from the end, not raw entries.
+//
+// keep=0 returns len(history) (nothing kept verbatim, summarize
+// everything). If fewer than keep user messages exist at all, ok is false
+// and the second return value is meaningless — there's nothing older than
+// "the last N turns" to compact.
+func compactCutIndex(history []ollama.Message, keep int) (cut int, ok bool) {
+	if keep <= 0 {
+		return len(history), true
+	}
+	count := 0
+	for i := len(history) - 1; i >= 1; i-- { // >= 1: never walk into the system message at index 0
+		if history[i].Role == "user" {
+			count++
+			if count == keep {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func compactHistory(ctx context.Context, out io.Writer, session *chatSession, history []ollama.Message, keep int) []ollama.Message {
+	cut, ok := compactCutIndex(history, keep)
+	if !ok {
+		// Fewer than `keep` user turns exist in the whole conversation —
+		// there's nothing older than "the last N turns" to summarize.
+		fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, "nothing to compact: fewer user turns than N"))
+		return history
+	}
+
+	// toSummarize excludes the leading system message (index 0) — nothing to
+	// gain by asking the model to summarize its own fixed instructions back
+	// to itself — and everything from cut onward, which stays verbatim.
+	toSummarize := history[1:cut]
+	kept := history[cut:]
+	if len(toSummarize) == 0 {
+		fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, "nothing to compact"))
+		return history
+	}
+
+	before := agent.BuildContextReport(session.model, session.modelInfo.ContextLength, history, session.registry.Definitions())
+
+	summarizeReq := append(append([]ollama.Message{}, toSummarize...), ollama.Message{Role: "user", Content: compactPromptSuffix})
+	summarizeReq = append([]ollama.Message{agent.SystemMessage()}, summarizeReq...)
+
+	// Discard the summarization call's own streamed output — the user asked
+	// to compact, not to watch an extra turn scroll by — but keep using the
+	// session's real agent/registry so it reflects the current model exactly
+	// like every other command.
+	quietAg := agent.New(session.client, session.registry, agent.Options{
+		Model:         session.model,
+		MaxToolCalls:  session.maxToolCalls,
+		Stdout:        io.Discard,
+		ColorLevel:    terminal.None,
+		ContextLength: session.modelInfo.ContextLength,
+		NumCtx:        session.numCtx,
+		KeepAlive:     session.keepAlive,
+	})
+	result, err := quietAg.Run(ctx, summarizeReq)
+	if err != nil {
+		fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, "could not compact: "+err.Error()))
+		return history
+	}
+
+	summaryMsg := ollama.Message{Role: "user", Content: "[Earlier conversation summary]\n" + result.Answer}
+	newHistory := append([]ollama.Message{agent.SystemMessage(), summaryMsg}, kept...)
+
+	after := agent.BuildContextReport(session.model, session.modelInfo.ContextLength, newHistory, session.registry.Definitions())
+	summaryTokens := agent.BuildContextReport(session.model, 0, []ollama.Message{summaryMsg}, nil).ConversationTokens
+	fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, fmt.Sprintf(
+		"compacted %d message(s) into a summary (~%s tokens); kept last %d user turn(s) verbatim",
+		len(toSummarize), formatTokenCount(summaryTokens), keep)))
+	fmt.Fprintf(out, "%s\n", terminal.Dim(session.colorLevel, fmt.Sprintf("context usage: %s -> %s tokens", formatTokenCount(before.Used), formatTokenCount(after.Used))))
+
+	return newHistory
 }
 
 // handleSlashCommand processes a chat REPL command (a line starting with
@@ -1195,6 +1380,22 @@ func handleSlashCommand(ctx context.Context, rl *readline.Instance, line string,
 		fmt.Fprintf(out, "semantic cache: %d files, %d chunks, %.1f MiB (use /cache clear to wipe)\n",
 			files, chunks, float64(bytes)/(1024*1024))
 		return history
+
+	case "/context":
+		printContextReport(out, session, history)
+		return history
+
+	case "/compact":
+		keep := 0
+		if len(fields) >= 2 {
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n < 0 {
+				fmt.Fprintf(out, "%s\n", terminal.Red(session.colorLevel, fmt.Sprintf("usage: /compact [N] — N must be a non-negative integer, got %q", fields[1])))
+				return history
+			}
+			keep = n
+		}
+		return compactHistory(ctx, out, session, history, keep)
 
 	case "/config":
 		switch len(fields) {

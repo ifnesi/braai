@@ -26,7 +26,7 @@ func readImageDefinition() ollama.Tool {
 		Type: "function",
 		Function: ollama.ToolFunction{
 			Name:        "read_image",
-			Description: "Read an image (png, jpg, jpeg, gif, webp) within the working directory and attach it to the conversation so you can visually inspect it — e.g. to read text via OCR from a screenshot, or describe a diagram or photo. Only available when the active model supports vision.",
+			Description: "Read an image (png, jpg, jpeg, gif, webp) within the working directory and attach it to the conversation so you can visually inspect it — e.g. to read text via OCR from a screenshot, or describe a diagram or photo. If the user asks about a screenshot, diagram, or photo, use this tool rather than guessing at its contents from the filename. Only available when the active model supports vision.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

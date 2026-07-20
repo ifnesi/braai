@@ -12,6 +12,76 @@ project adheres to Semantic Versioning (https://semver.org): MAJOR.MINOR.PATCH.
 The newest release is listed first. Dates use ISO 8601 (YYYY-MM-DD).
 Categories: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+[0.5.0] - 2026-07-09
+---------------------
+
+Added
+  - /context command (interactive chat): shows an estimated breakdown of the
+    current conversation's context-window usage — a Claude-Code-style block-
+    bar gauge plus a per-category token table (system prompt, tool schemas,
+    conversation, free space). Backed by a new agent.BuildContextReport,
+    reusing the same char-count heuristic as the existing 80%-full warning
+    (messageTokenCost) rather than adding a second estimation method; tool-
+    schema size is estimated from the marshaled JSON size of
+    registry.Definitions(), since that's what's actually resent on every
+    request. All figures are explicitly labeled as estimates, consistent
+    with the existing warning's own caveat that it isn't a real tokenizer
+    count. New internal/agent/context_report.go + context_report_test.go
+    (4 unit tests).
+  - /compact [N] command (interactive chat): asks the model to summarize the
+    conversation so far and replaces the summarized portion of history with
+    the result, shrinking what gets resent to Ollama on every future turn.
+    N (default 0) is how many of the most recent user turns to keep
+    verbatim; a "turn" is counted by user-role messages, not raw history
+    entries, since a single turn can expand into many entries (tool_calls/
+    tool-result pairs, auto-context injections) — the cut-point logic
+    (compactCutIndex) walks backward counting user messages specifically so
+    "keep last N turns" means N real turns regardless of how many tool
+    calls any of them involved. An initial off-by-one version was caught by
+    manual tracing before it shipped (it was finding the (N+1)-th most
+    recent user turn and including it in "kept", instead of the N-th).
+    Reports messages summarized and before/after context
+    usage; declines to run (leaving history untouched) if there are fewer
+    user turns in the conversation than N. The summarization call itself
+    reuses the session's real agent/registry so it reflects the active
+    model, with its own streamed output discarded (io.Discard) since the
+    user asked to compact, not to watch an extra turn scroll by.
+    Verified end-to-end against a real model (multiple runs): the
+    summarization step itself was confirmed accurate and faithful to the
+    real conversation in every run tested. Separately observed occasional
+    hallucination on the follow-up turn after compacting (a fabricated
+    budget figure/filename not present in either the source files or the
+    summary) — reproduced this is pre-existing model non-determinism, not
+    caused by /compact: the identical follow-up question also succeeded and
+    failed unpredictably in fresh, uncompacted conversations with the same
+    files, and a fully isolated test of just the summarization call (bypassing
+    /compact's history-splicing entirely) always produced an accurate,
+    non-fabricated summary. Worth keeping in mind when using /compact (or
+    auto-context, or this codebase generally) with smaller/more exploratory
+    local models — braai's own system prompt already tells the model not to
+    invent facts, but cannot force compliance.
+
+Changed
+  - System prompt no longer hardcodes the tool list or per-tool argument
+    descriptions. Rule #4 previously named each tool by hand (list_dir,
+    read, search, stat_file, get_chunk, read_image) with a prose copy of
+    each one's arguments — duplicating what the tools array (JSON Schema)
+    already sends the model on every request, and already provably out of
+    sync: fetch_url (added in 0.3.0) was never added to this list, and rule
+    #3 still referenced read_files, a tool name folded into read(paths=[...])
+    back in 0.1.2 and not advertised since. Replaced both with generic
+    instructions that don't need updating when the toolset changes — each
+    tool's own Description field is now the single source of truth for its
+    behavior, so adding/removing/renaming a tool only means editing that
+    tool's file, not also remembering to update agent.go.
+  - Rule #7 (use read_image for screenshots/diagrams/photos rather than
+    guessing from the filename) moved out of the system prompt and into
+    read_image's own tool Description in internal/tools/read_image.go — the
+    same rationale as above, but for a behavioral nudge rather than a plain
+    capability listing. This travels with the tool now instead of living in
+    a second, generic location that could drift.
+
+
 [0.4.1] - 2026-07-09
 ---------------------
 

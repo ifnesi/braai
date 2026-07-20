@@ -135,7 +135,7 @@ When braai starts an interactive session it prints a mascot alongside the
 session info:
 
 ```
- ╭◠◠◠◠◠╮    braai 0.4.1       
+ ╭◠◠◠◠◠╮    braai 0.5.0       
  |_____|    Working directory: .
  [◕ ‿ ◕]    Model: qwen3.6:35b-mlx
 <╞═════╡>   Licensed under the Apache License 2.0
@@ -153,6 +153,8 @@ Commands:
   /export json <file>       save conversation as a JSON array
   /copy [last]              copy full conversation (or last answer) to clipboard
   /cache [clear]            show semantic-search cache stats (clear: wipe it)
+  /context                  show estimated context-window usage for this conversation
+  /compact [N]              summarize the conversation to shrink context; keep last N user turns verbatim (default 0)
   /cmd [<name> [args...]]   run a custom prompt template (/cmd to list)
   @<path>                   inline a file's content into the prompt sent to the model
                               supported: text, PDF, Word, Excel, HTML, and more
@@ -202,6 +204,8 @@ A few slash-commands are available inside the chat. Press **Tab** after `/` (or 
 | `/export json <file>` | Save the conversation as a JSON array `[{role, content}]` |
 | `/copy [last]` | Copy full conversation to clipboard; `last` copies only the most recent answer |
 | `/cache [clear]` | Show semantic-search cache stats; `clear` wipes the current directory's cache |
+| `/context` | Show an estimated breakdown of the current conversation's context-window usage (system prompt, tool schemas, conversation, free space) |
+| `/compact [N]` | Ask the model to summarize the conversation so far to shrink context; keeps the last `N` user turns verbatim (default `0` = summarize everything) |
 | `/cmd [<name> [args...]]` | Run a custom prompt template; no args lists available commands |
 | `/bye` | Exit the chat (same as `exit`, `quit`, or Ctrl + d) |
 
@@ -252,7 +256,44 @@ prints a yellow warning (e.g. `warning: conversation is ~85% of gemma4:e4b's
 estimated 131072-token context window...`) suggesting `/clear`, a shorter
 prompt, or reading fewer files at once. This is based on a rough
 character-count estimate, not the model's actual tokenizer, so treat it as a
-heads-up rather than an exact measurement.
+heads-up rather than an exact measurement. Use `/context` to see the current
+estimated breakdown at any time, and `/compact` (below) to actually shrink it
+instead of starting over with `/clear`.
+
+### Compacting the conversation
+
+`/compact [N]` asks the model to summarize everything in the conversation so
+far into a short recap, replacing the original messages with that summary —
+shrinking what gets resent to Ollama on every future turn, without losing the
+conversation entirely the way `/clear` does.
+
+```
+>>> /compact          # summarize the whole conversation so far
+>>> /compact 2         # keep the last 2 user turns verbatim; summarize everything before them
+```
+
+`N` (optional, default `0`) is how many of the most recent user turns to keep
+untouched — a "turn" here means one user message plus everything the model
+did in response to it (tool calls, tool results, its answer), so a turn that
+involved several tool calls is still counted as one. Keeping a turn or two
+verbatim protects exact details (a quote, a number, a file path) you're
+likely to ask a follow-up about, at the cost of a slightly larger post-compact
+context than summarizing everything.
+
+`/compact` prints how many messages were folded into the summary and the
+context usage before/after, e.g.:
+
+```
+compacted 6 message(s) into a summary (~180 tokens); kept last 1 user turn(s) verbatim
+context usage: 14.2k -> 2.1k tokens
+```
+
+This costs one extra (non-streamed) model call to generate the summary, and —
+like any summarization — is lossy and best-effort: a smaller local model may
+compress out nuance a larger one wouldn't. If there are fewer user turns in
+the conversation than `N`, or nothing older than the last `N` turns to
+summarize, `/compact` says so and leaves history unchanged rather than
+spending a model call on nothing.
 
 If `--model` is omitted, `braai` uses the first model reported by the Ollama
 server (preferring the last model you used, if it's still installed). If no

@@ -25,28 +25,17 @@ using the tools provided. Rules you must follow:
 3. Use tools whenever you need evidence to answer accurately. Prefer the
    minimum number of tool calls needed — do not call a tool "just in case" if
    you already have enough information. When you already know which several
-   files you need (e.g. summarizing a batch of meeting notes), prefer
-   read_files over multiple individual read_file calls.
-4. Stay within the fixed toolset you are given: list_dir, read, search,
-   stat_file, get_chunk, and (only on vision-capable models) read_image.
-   - list_dir(path, depth, extensions, name_contains): enumerate files; use
-     depth=100 to see a whole tree, extensions to filter by type, and
-     name_contains to find files whose name contains a word.
-   - read(path | paths, start_line, end_line): read one or many files; text
-     and documents (PDF/Word/Excel/PowerPoint/HTML/RTF) are handled
-     automatically. A very large single document returns a chunk manifest;
-     use get_chunk(path, chunk_index) to read a chunk.
-   - search(query, semantic, path, ...): semantic=false is a fast exact
-     substring match (with line numbers); semantic=true matches by meaning
-     and returns passages with chunk_index (read them with get_chunk); set
-     path to restrict a semantic search to one document.
+   files you need (e.g. summarizing a batch of meeting notes), read them in
+   one batched call rather than one call per file, if the tool supports it.
+4. Stay within the tools you're given — don't claim to have capabilities
+   beyond them. Each tool's own description (in its schema) tells you its
+   arguments and behavior; rely on that rather than assuming a tool works a
+   particular way.
 5. When you are confident you have enough information, stop calling tools and
    give a concise, grounded final answer. Reference specific file paths when
    relevant.
 6. If a tool call fails or a file cannot be found, say so plainly rather than
-   guessing.
-7. If read_image is available and the user asks about a screenshot, diagram,
-   or photo, use it rather than guessing at an image's contents from its name.`
+   guessing.`
 
 // Options configures a single agent run.
 type Options struct {

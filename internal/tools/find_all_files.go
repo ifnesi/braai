@@ -56,7 +56,7 @@ func (r *Registry) findAllFiles(args map[string]any) (Result, error) {
 		}
 
 		// Skip certain directories
-		if d.IsDir() && skipDirNames[d.Name()] {
+		if d.IsDir() && SkipDirNames[d.Name()] {
 			return filepath.SkipDir
 		}
 
